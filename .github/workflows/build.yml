@@ -1,0 +1,95 @@
+name: Build CalcFront
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CEDEV_VERSION: v15.0
+  CLIBS_URL: https://github.com/CE-Programming/libraries/releases/latest
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache the CE C toolchain
+        id: cedev
+        uses: actions/cache@v4
+        with:
+          path: ~/CEdev
+          key: cedev-${{ env.CEDEV_VERSION }}
+
+      - name: Install the CE C toolchain
+        if: steps.cedev.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL -o /tmp/CEdev.tar.gz \
+            "https://github.com/CE-Programming/toolchain/releases/download/${CEDEV_VERSION}/CEdev-Linux.tar.gz"
+          tar xzf /tmp/CEdev.tar.gz -C "$HOME"
+
+      - name: Build the calculator program
+        run: |
+          export PATH="$HOME/CEdev/bin:$PATH"
+          make
+
+      - name: Build the PC test harness
+        run: make -C host
+
+      - name: Package the game and the maps
+        run: |
+          mkdir -p dist/CalcFront/maps
+          cp bin/CALCFRNT.8xp dist/CalcFront/
+          cp maps/calc/*.8xv dist/CalcFront/maps/
+          cp maps/LICENSE.md dist/CalcFront/maps/LICENSE.md
+          cp packaging/README.txt dist/CalcFront/README.txt
+          cp LICENSE dist/CalcFront/LICENSE.txt
+          (cd dist && zip -r ../CalcFront.zip CalcFront)
+
+      - name: Upload the zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: CalcFront
+          path: dist/CalcFront
+
+      - name: Write the build summary
+        run: |
+          {
+            echo "## CalcFront built"
+            echo
+            echo "Download **CalcFront** from the artifacts of this run: it contains"
+            echo "\`CALCFRNT.8xp\` (the game) and \`maps/*.8xv\` (all $(ls maps/calc/*.8xv | wc -l) maps)."
+            echo
+            echo "> **You also need the CE C libraries** (graphx, keypadc, fileioc...)."
+            echo "> Download \`clibs.8xg\` from <${CLIBS_URL}> and send it to your calculator"
+            echo "> together with the game and the maps. Setup steps are in README.txt inside the zip."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Move the "latest" tag to this commit
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git tag -f latest
+          git push -f origin latest
+
+      - name: Publish the "Latest build" pre-release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest build
+          prerelease: true
+          files: CalcFront.zip
+          body_path: packaging/RELEASE.md
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CalcFront.zip
+          body_path: packaging/RELEASE.md

@@ -1,0 +1,14 @@
+# build output
+obj/
+bin/
+host/cfhost
+dist/
+*.zip
+
+# OpenFront map sources (fetch with tools/fetch_maps.sh) and PC-only map files
+vendor/
+maps/pc/
+maps/calc/_tmp*
+
+__pycache__/
+*.bmp
