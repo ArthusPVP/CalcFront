@@ -12,8 +12,13 @@ Ideas for future work, roughly by priority. Contributions on any of them are wel
   the calculator's smaller tile counts, using the PC harness to run many games.
 - [ ] **AI nukes and SAMs.** Nations rarely save enough gold for silos; make the
   economy-to-weapons path work on Medium and above.
+- [ ] **Faster scrolling** Scroll the screen by copying video memory instead of redrawing it all.
 - [ ] **Clearer feedback.** Show your incoming attacks and their troops, an alliance
   timer, and the gold earned by trade and trains.
+- [ ] **Tiny but impactful improvements** Fix attack boats not finding a way to a location
+  and lagging too much the game, find a more precice and **more efficient** way to calculate map percentage. See [Issue 6](https://github.com/ArthusPVP/CalcFront/issues/6)
+- [ ] **Improve HUD** move non-important statistics (troops/sec, % of the land) on a sub-menu. See [Issue 4](https://github.com/ArthusPVP/CalcFront/issues/4)
+
 
 ## Gameplay
 
@@ -30,7 +35,7 @@ Ideas for future work, roughly by priority. Contributions on any of them are wel
 ## Technical
 
 - [ ] Make code smaller, to lower the RAM needed (about 120 KB today).
-- [ ] Scroll the screen by copying video memory instead of redrawing it all. (important)
+- [ ] Fix rendering and make a clearer tutorial screen 
 - [ ] Faster AI decisions on big games (per-tick AI budget).
 - [ ] Run the PC harness in GitHub Actions on every push, with generated maps
   cached, and check that games stay deterministic.
