@@ -237,19 +237,11 @@ packaging/        notes shipped in the release zip
 docs/             screenshots and the original design plan
 ```
 
-<<<<<<< HEAD
-=======
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md): how the files fit together, memory layout, what happens in one tick.
 - [Roadmap](docs/ROADMAP.md): ideas for future improvements.
 
-## Documentation
-
-- [Architecture](docs/ARCHITECTURE.md): how the files fit together, memory layout, what happens in one tick.
-- [Roadmap](docs/ROADMAP.md): ideas for future improvements.
-
->>>>>>> 4d28c2d (Add architecture guide and roadmapOB)
 ## Contributing
 
 Anything goes: bug fixes, balance, new maps, better AI, smaller code, ports to
