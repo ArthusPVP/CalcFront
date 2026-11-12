@@ -1,0 +1,28 @@
+diff --git a/tests/autotester/headless_cli.cpp b/tests/autotester/headless_cli.cpp
+index fa2951e..bb00f33 100644
+--- a/tests/autotester/headless_cli.cpp
++++ b/tests/autotester/headless_cli.cpp
+@@ -27,6 +27,7 @@ namespace cemucore
+     extern "C"
+     {
+         #include "../../core/usb/usb.h"
++        #include "../../core/extras.h"
+ 
+         void gui_console_clear() {}
+         void gui_debug_close(void) {}
+@@ -255,6 +256,15 @@ bool runCommand(const std::string& line)
+                 "usb <VID:PID|bus#address|disconnect>; reset; status; quit");
+         return true;
+     }
++    if (command == "launch") {
++        std::string name; input >> name;
++        auto sk=[](uint16_t k){int r=200; do{ if(cemucore::sendKey(k))break; cemucore::emu_run(50);}while(r--);};
++        sk(0x09); sk(0xDA);
++        for(char c: name){int r=200; do{ if(cemucore::sendLetterKeyPress(c))break; cemucore::emu_run(50);}while(r--);}
++        sk(0x05);
++        respond("OK launch");
++        return true;
++    }
+     if (command == "run") {
+         std::string value;
+         uint32_t milliseconds;
