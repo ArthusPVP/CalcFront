@@ -417,11 +417,23 @@ static void nuke_tick(unit_t *u)
     }
 }
 
+/* counts and caches normally refreshed by units_tick (after loading a game) */
+void units_refresh(void)
+{
+    uint8_t i;
+    recount();
+    g_nTrade = g_nTrain = 0;
+    for (i = 0; i < g_unHi; i++) {
+        if (g_un[i].type == U_TRADE) g_nTrade++;
+        if (g_un[i].type == U_TRAIN) g_nTrain++;
+    }
+}
+
 /* ----------------------------------------------------------------- tick --- */
 void units_tick(void)
 {
     uint8_t i, nt = 0, ntr = 0;
-    recount();
+    PROF(3, recount());
     for (i = 1; i <= g_nplayers; i++) g_pl[i].nPost = 0;
     for (i = 0; i < nPosts; i++) g_pl[postOwn[i]].nPost++;
     for (i = 0; i < g_unHi; i++) {
@@ -444,26 +456,26 @@ void units_tick(void)
                     ui_dirty_unit(u->pos);
                 }
             } else if (u->type == U_PORT)
-                port_tick(i);
+                PROF(5, port_tick(i));
             else if (u->type == U_FACTORY)
-                factory_tick(i);
+                PROF(7, factory_tick(i));
             break;
         case U_BOAT:
-            boat_tick(u);
+            PROF(6, boat_tick(u));
             break;
         case U_TRADE:
             nt++;
-            trade_tick(u);
+            PROF(6, trade_tick(u));
             break;
         case U_WARSHIP:
-            warship_tick(i);
+            PROF(4, warship_tick(i));
             break;
         case U_SHELL:
             shell_tick(u);
             break;
         case U_TRAIN:
             ntr++;
-            train_tick(u);
+            PROF(7, train_tick(u));
             break;
         case U_ATOM:
         case U_HYDRO:

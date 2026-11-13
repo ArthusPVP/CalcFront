@@ -1,6 +1,8 @@
 /* map renderer: full redraws, incremental repaints, sprites, railways, cursor
  *
  * Everything is drawn straight into video memory (single buffer). Each frame:
+ *   0. if the camera moved, slide the picture already on screen (a block
+ *      copy) and paint only the strips that came into view
  *   1. repaint the map under sprites that moved, the cursor and changed
  *      buildings (paint_rect: row by row, one colour lookup per tile span)
  *   2. repaint tiles whose owner changed (and their neighbours: borders)
@@ -12,7 +14,7 @@
 int camx, camy;
 uint8_t zoom = 2;
 uint16_t curx, cury;
-uint8_t vy0 = MAP_Y0, vh = MAP_H;
+uint8_t vy0 = 12, vh = 206;
 uint8_t nukeRing;
 int16_t r_sel = -1;
 
@@ -30,6 +32,8 @@ static uint16_t dqh, dqn;
 static tile_t sq[SQ];
 static uint8_t sqn;
 static bool fullReq;
+static int drawnCamX, drawnCamY; /* camera of the picture in video memory */
+static bool railOn;              /* any railway to draw */
 
 static tile_t drawnAt[MAX_UNITS];
 static uint8_t drawnType[MAX_UNITS];
@@ -47,33 +51,23 @@ static const uint8_t nationRGB[20][3] = {
 
 static void build_masks(void);
 
+/* fixed colours C_BLACK .. C_LOGO3, converted at compile time */
+#define RGB(r, g, b) gfx_RGBTo1555(r, g, b)
+static const uint16_t baseRGB[C_FILL] = {
+    RGB(0, 0, 0), RGB(255, 255, 255), RGB(28, 30, 40), RGB(150, 155, 170),     /* black white panel dim */
+    RGB(255, 220, 60), RGB(255, 60, 50), RGB(80, 220, 90), RGB(110, 110, 120), /* yellow red green grey */
+    RGB(10, 10, 16), RGB(255, 150, 30), RGB(80, 220, 255), RGB(52, 40, 34),    /* void orange cyan rail */
+    RGB(40, 44, 58), RGB(24, 110, 220), RGB(240, 130, 40), RGB(20, 70, 36),    /* bar bg, bar, bar out, dk green */
+    RGB(22, 42, 92), RGB(40, 72, 124), RGB(150, 190, 110), RGB(186, 176, 116), /* ocean lake plains highland */
+    RGB(226, 226, 216), RGB(96, 214, 40), RGB(120, 196, 50), RGB(150, 220, 90), /* mountain, fallout x3 */
+    RGB(70, 8, 8), RGB(255, 140, 110), RGB(235, 45, 45), RGB(180, 26, 26),     /* logo: edge, light, red, dark */
+    RGB(14, 14, 22), RGB(40, 46, 64), RGB(0, 0, 0), RGB(0, 0, 0),              /* shadow, key cap */
+};
+
 void r_palette(void)
 {
     uint16_t i;
-    pal(C_BLACK, 0, 0, 0);
-    pal(C_WHITE, 255, 255, 255);
-    pal(C_PANEL, 28, 30, 40);
-    pal(C_DIM, 150, 155, 170);
-    pal(C_YELLOW, 255, 220, 60);
-    pal(C_RED, 255, 60, 50);
-    pal(C_GREEN, 80, 220, 90);
-    pal(C_GREY, 110, 110, 120);
-    pal(C_VOID, 10, 10, 16);
-    pal(C_ORANGE, 255, 150, 30);
-    pal(C_CYAN, 80, 220, 255);
-    pal(C_RAIL, 52, 40, 34);
-    pal(C_BARBG, 40, 44, 58);
-    pal(C_BAR, 24, 110, 220);
-    pal(C_BARATK, 240, 130, 40);
-    pal(C_DKGREEN, 20, 70, 36);
-    pal(C_OCEAN, 22, 42, 92);
-    pal(C_LAKE, 40, 72, 124);
-    pal(C_PLAINS, 150, 190, 110);
-    pal(C_HIGH, 186, 176, 116);
-    pal(C_MOUNT, 226, 226, 216);
-    pal(C_FPLAINS, 96, 214, 40);
-    pal(C_FHIGH, 120, 196, 50);
-    pal(C_FMOUNT, 150, 220, 90);
+    memcpy(gfx_palette, baseRGB, sizeof baseRGB);
     for (i = 0; i < 256; i++) {
         uint8_t b = (uint8_t)i, t = (b >> 5) & 3, c;
         if (!t)
@@ -110,16 +104,6 @@ void r_player_colors(void)
 #define DIFF(n, b) (((n) & T_TERR) && (((n) ^ (b)) & T_OWNER))
 
 static int negW;
-
-static uint8_t tile_color(tile_t t)
-{
-    const uint8_t *p = g_map + t;
-    uint8_t b = *p, c = colLUT[b];
-    if (c >= C_FILL) {
-        if (DIFF(p[1], b) || DIFF(p[-1], b) || DIFF(p[g_W], b) || DIFF(p[negW], b)) c += 32;
-    }
-    return c;
-}
 
 static void set_zoom_info(void)
 {
@@ -175,7 +159,7 @@ static void paint_rect(int x0, int y0, int x1, int y1)
                     c = C_VOID;
                 else {
                     TILE_COLOR(mp, c);
-                    if (bitget(g_railbits, (tile_t)(rowT + mx))) {
+                    if (railOn && bitget(g_railbits, (tile_t)(rowT + mx))) {
                         if (zoom <= 2)
                             c = C_RAIL;
                         else
@@ -228,12 +212,12 @@ void ui_dirty_unit(tile_t t)
 }
 
 /* ----------------------------------------------------------- sprites --- */
-static void px(int x, int y, uint8_t c)
+__attribute__((noinline)) static void px(int x, int y, uint8_t c)
 {
     if ((unsigned)x < SCR_W && (unsigned)y < vh) VRAM[(unsigned)(y + vy0) * SCR_W + x] = c;
 }
 
-static void fill(int x0, int y0, int w, int h, uint8_t c)
+__attribute__((noinline)) static void fill(int x0, int y0, int w, int h, uint8_t c)
 {
     uint8_t *p;
     if (x0 < 0) {
@@ -254,6 +238,15 @@ static void fill(int x0, int y0, int w, int h, uint8_t c)
     }
 }
 
+/* square outline, side n */
+static void outline(int x, int y, int n, uint8_t c)
+{
+    fill(x, y, n, 1, c);
+    fill(x, y + n - 1, n, 1, c);
+    fill(x, y, 1, n, c);
+    fill(x + n - 1, y, 1, n, c);
+}
+
 /* 7x7 structure glyphs, one byte per row, bit 6 = left */
 static const uint8_t structGlyph[7][7] = {
     {0, 0, 0, 0, 0, 0, 0},
@@ -265,17 +258,18 @@ static const uint8_t structGlyph[7][7] = {
     {0x41, 0x22, 0x14, 0x08, 0x1C, 0x3E, 0x7F}, /* SAM: radar */
 };
 
-/* ship glyphs, 9 wide x 5 high, bit 8 = left */
-static const uint16_t shipGlyph[3][5] = {
-    {0x010, 0x038, 0x1FF, 0x0FE, 0x07C}, /* transport boat */
-    {0x030, 0x038, 0x1FF, 0x0FE, 0x07C}, /* trade ship */
-    {0x010, 0x054, 0x1FF, 0x0FE, 0x07C}, /* warship */
+/* ship glyphs, 7x7, one byte per row, bit 6 = left: a transport boat is an
+ * "x", a trade ship a dot, a warship a "+" */
+static const uint8_t shipGlyph[3][7] = {
+    {0x00, 0x22, 0x36, 0x1C, 0x36, 0x22, 0x00}, /* transport boat */
+    {0x00, 0x00, 0x1C, 0x1C, 0x1C, 0x00, 0x00}, /* trade ship */
+    {0x1C, 0x1C, 0x7F, 0x7F, 0x7F, 0x1C, 0x1C}, /* warship */
 };
 
-/* pre-built masks: 0 = transparent, 1 = black outline, 2 = body colour */
-#define SM_W 11
-#define SM_H 7
-static uint8_t shipMask[3][SM_H][SM_W];
+/* pre-built masks: 0 = transparent, 1 = black outline, 2 = body colour;
+ * a glyph pixel (x, y) is mask pixel (x + 1, y + 1), centre (4, 4) */
+#define SM 9
+static uint8_t shipMask[3][SM][SM];
 /* structure badges: 0 = black frame, 1 = background, 2 = glyph */
 static uint8_t structMask[7][9][9];
 
@@ -284,15 +278,15 @@ static void build_masks(void)
     uint8_t k, x, y;
     memset(shipMask, 0, sizeof shipMask);
     for (k = 0; k < 3; k++) {
-        for (y = 0; y < 5; y++)
-            for (x = 0; x < 9; x++)
-                if (shipGlyph[k][y] & (0x100 >> x)) {
+        for (y = 0; y < 7; y++)
+            for (x = 0; x < 7; x++)
+                if (shipGlyph[k][y] & (0x40 >> x)) {
                     shipMask[k][y + 1][x] = shipMask[k][y + 1][x + 2] = 1;
                     shipMask[k][y][x + 1] = shipMask[k][y + 2][x + 1] = 1;
                 }
-        for (y = 0; y < 5; y++)
-            for (x = 0; x < 9; x++)
-                if (shipGlyph[k][y] & (0x100 >> x)) shipMask[k][y + 1][x + 1] = 2;
+        for (y = 0; y < 7; y++)
+            for (x = 0; x < 7; x++)
+                if (shipGlyph[k][y] & (0x40 >> x)) shipMask[k][y + 1][x + 1] = 2;
     }
     for (k = 1; k < 7; k++)
         for (y = 0; y < 9; y++)
@@ -319,8 +313,13 @@ static void blit(const uint8_t *m, uint8_t w, uint8_t h, int x0, int y0, const u
             if (*m || cols[0] != 0xFF) px(x0 + x, y0 + y, cols[*m]);
 }
 
-static int scr_x(tile_t t) { return (((int)tx(t) - camx) << zsh) + (zoom >> 1); }
-static int scr_y(tile_t t) { return (((int)ty(t) - camy) << zsh) + (zoom >> 1); }
+/* screen centre of tile t */
+FORCE_INLINE void scr_xy(tile_t t, int *x, int *y)
+{
+    int ty_ = ty(t);
+    *x = (((int)(t - g_rowStart[ty_]) - camx) << zsh) + (zoom >> 1);
+    *y = ((ty_ - camy) << zsh) + (zoom >> 1);
+}
 
 static void draw_struct(const unit_t *u, int cx, int cy)
 {
@@ -348,13 +347,13 @@ static void draw_ship(const unit_t *u, int cx, int cy)
     cols[0] = 0xFF; /* transparent */
     cols[1] = C_BLACK;
     cols[2] = C_FILL + u->owner;
-    blit(&shipMask[u->type - U_BOAT][0][0], SM_W, SM_H, cx - 5, cy - 3, cols);
-    if (u->type == U_TRADE && u->owner != u->orig) px(cx, cy - 1, C_BLACK); /* captured */
+    blit(&shipMask[u->type - U_BOAT][0][0], SM, SM, cx - 4, cy - 4, cols);
+    if (u->type == U_TRADE && u->owner != u->orig) px(cx, cy, C_BLACK); /* captured */
     if (u->type == U_WARSHIP) {
         uint8_t max = (uint8_t)WS_MAXHP(u), w = (uint8_t)((u->hp * 9u + max - 1) / max), x;
         if (u->hp < max) {
-            fill(cx - 5, cy - 6, 11, 3, C_BLACK);
-            fill(cx - 4, cy - 5, w, 1, u->hp * 2 > max ? C_GREEN : C_RED);
+            fill(cx - 5, cy - 7, 11, 3, C_BLACK);
+            fill(cx - 4, cy - 6, w, 1, u->hp * 2 > max ? C_GREEN : C_RED);
         }
         for (x = 0; x < u->level; x++) px(cx - 1 + x, cy, C_YELLOW); /* veterancy */
     }
@@ -378,34 +377,22 @@ static void sprite(const unit_t *u, int cx, int cy)
     }
 }
 
+/* midpoint circle with per-pixel clipping; colour 0xFF repaints the map
+ * under it instead */
+#define UNDER 0xFF
 static void ring(int cx, int cy, int r, uint8_t c)
 {
-    /* midpoint circle with per-pixel clipping */
     int x = r, y = 0, e = 1 - r;
+    uint8_t k;
     while (x >= y) {
-        px(cx + x, cy + y, c); px(cx - x, cy + y, c);
-        px(cx + x, cy - y, c); px(cx - x, cy - y, c);
-        px(cx + y, cy + x, c); px(cx - y, cy + x, c);
-        px(cx + y, cy - x, c); px(cx - y, cy - x, c);
-        y++;
-        if (e < 0)
-            e += 2 * y + 1;
-        else {
-            x--;
-            e += 2 * (y - x) + 1;
+        for (k = 0; k < 8; k++) {
+            int a = (k & 4) ? y : x, b = (k & 4) ? x : y;
+            int X = cx + ((k & 1) ? -a : a), Y = cy + ((k & 2) ? -b : b);
+            if (c == UNDER)
+                paint_rect(X, Y, X, Y);
+            else
+                px(X, Y, c);
         }
-    }
-}
-
-static void erase_ring(int cx, int cy, int r)
-{
-    /* repaint the map along the circle, one octant run at a time */
-    int x = r, y = 0, e = 1 - r;
-    while (x >= y) {
-        paint_rect(cx - x, cy + y, cx - x, cy + y); paint_rect(cx + x, cy + y, cx + x, cy + y);
-        paint_rect(cx - x, cy - y, cx - x, cy - y); paint_rect(cx + x, cy - y, cx + x, cy - y);
-        paint_rect(cx - y, cy + x, cx - y, cy + x); paint_rect(cx + y, cy + x, cx + y, cy + x);
-        paint_rect(cx - y, cy - x, cx - y, cy - x); paint_rect(cx + y, cy - x, cx + y, cy - x);
         y++;
         if (e < 0)
             e += 2 * y + 1;
@@ -464,9 +451,9 @@ static int16_t lastSel = -1; /* selection box drawn last frame */
 static const int8_t spriteBox[U_TYPES][4] = {
     {0, 0, 0, 0},     {0, 0, 0, 0},     {0, 0, 0, 0},     {0, 0, 0, 0},
     {0, 0, 0, 0},     {0, 0, 0, 0},     {0, 0, 0, 0},
-    {-5, -3, 5, 3},   /* boat */
-    {-5, -3, 5, 3},   /* trade ship */
-    {-5, -6, 5, 3},   /* warship (health bar above) */
+    {-3, -3, 3, 3},   /* boat */
+    {-2, -2, 2, 2},   /* trade ship */
+    {-5, -7, 5, 4},   /* warship (health bar above) */
     {-2, -2, 2, 2},   {-2, -2, 2, 2},   {-2, -2, 2, 2}, /* missiles */
     {0, 0, 1, 1},     /* shell */
     {-2, -2, 2, 2},   /* train */
@@ -476,10 +463,10 @@ static const int8_t spriteBox[U_TYPES][4] = {
 static void sprite_rect(uint8_t type, bool sel, int cx, int cy, int *x0, int *y0, int *x1, int *y1)
 {
     if (sel) {
-        *x0 = cx - 6;
-        *y0 = cy - 6;
-        *x1 = cx + 6;
-        *y1 = cy + 6;
+        *x0 = cx - 8;
+        *y0 = cy - 8;
+        *x1 = cx + 8;
+        *y1 = cy + 8;
         return;
     }
     *x0 = cx + spriteBox[type][0];
@@ -504,20 +491,41 @@ static void repaint_tile(int x, int y, tile_t t)
     sx = (x - camx) << zsh;
     sy = (y - camy) << zsh;
     if (sx < 0 || sx >= SCR_W || sy < 0 || sy >= vh) return;
-    if (zoom == 1) {
-        /* one pixel: no need for the rectangle machinery */
-        uint8_t c;
+    if (sy + zoom > vh) {
+        /* cut by the bottom of the view */
+        paint_rect(sx, sy, sx + zoom - 1, sy + zoom - 1);
+        return;
+    }
+    {
+        /* a whole tile: one colour, zoom x zoom pixels, rail mark in the middle */
+        uint8_t c, k, *d = VRAM + (unsigned)(sy + vy0) * SCR_W + sx;
+        bool rail = false;
         const uint8_t *mp = g_map + t;
         if (x < 0 || y < 0 || x >= (int)g_W || y >= (int)g_H)
             c = C_VOID;
         else {
             TILE_COLOR(mp, c);
-            if (bitget(g_railbits, t)) c = C_RAIL;
+            if (railOn && bitget(g_railbits, t)) {
+                if (zoom <= 2)
+                    c = C_RAIL;
+                else
+                    rail = true;
+            }
         }
-        VRAM[(unsigned)(sy + vy0) * SCR_W + sx] = c;
-        return;
+        switch (zoom) {
+        case 1:
+            *d = c;
+            break;
+        case 2:
+            d[0] = d[1] = d[SCR_W] = d[SCR_W + 1] = c;
+            break;
+        default:
+            for (k = 0; k < zoom; k++, d += SCR_W) {
+                memset(d, c, zoom);
+                if (rail && (uint8_t)(k - railLo) < railN) memset(d + railLo, C_RAIL, railN);
+            }
+        }
     }
-    paint_rect(sx, sy, sx + zoom - 1, sy + zoom - 1);
 }
 
 /* Draw sprites: buildings first, then everything that moves, each in slot
@@ -537,8 +545,7 @@ static void overlays(bool all)
         if (!IS_STRUCT(u->type)) continue;
         drawnAt[i] = NO_TILE;
         drawnType[i] = u->type;
-        cx = scr_x(u->pos);
-        cy = scr_y(u->pos);
+        scr_xy(u->pos, &cx, &cy);
         if (!on_screen(cx, cy) || !(all || touched(cx - 9, cy - 4, cx + 9, cy + 7))) continue;
 #ifdef CF_PERF
         g_perfNb++;
@@ -556,13 +563,17 @@ static void overlays(bool all)
             continue;
         }
         if (IS_STRUCT(t)) continue;
+        if (zoom == 1 && (t == U_TRADE || t == U_TRAIN)) {
+            /* zoomed all the way out: too small to matter, too many to draw */
+            drawnType[i] = 0;
+            continue;
+        }
         changed = drawnType[i] != t || drawnAt[i] != u->pos;
         drawnAt[i] = u->pos;
         drawnType[i] = t;
         /* what else forces a repaint: warship health, explosion size */
         drawnLevel[i] = t == U_WARSHIP ? u->hp : u->level;
-        cx = scr_x(u->pos);
-        cy = scr_y(u->pos);
+        scr_xy(u->pos, &cx, &cy);
         if (t == U_BOOM) {
             int r = u->level * zoom;
             ring(cx, cy, r, (u->timer & 1) ? C_YELLOW : C_RED);
@@ -581,14 +592,7 @@ static void overlays(bool all)
             mark(bx0, by0, bx1, by1);
         }
         if (i == r_sel) {
-            int k;
-            uint8_t c = (clock() & (CLOCKS_PER_SEC / 4)) ? C_YELLOW : C_WHITE;
-            for (k = -6; k <= 6; k++) {
-                px(cx + k, cy - 6, c);
-                px(cx + k, cy + 6, c);
-                px(cx - 6, cy + k, c);
-                px(cx + 6, cy + k, c);
-            }
+            outline(cx - 8, cy - 8, 17, (clock() & (CLOCKS_PER_SEC / 4)) ? C_YELLOW : C_WHITE);
         }
     }
     PERF_ADD(5);
@@ -618,18 +622,8 @@ static void cursor(void)
 {
     int cx = ((int)curx - camx) << zsh, cy = ((int)cury - camy) << zsh, k;
     if (zoom >= 4) {
-        for (k = 0; k < zoom; k++) {
-            px(cx + k, cy, C_WHITE);
-            px(cx + k, cy + zoom - 1, C_WHITE);
-            px(cx, cy + k, C_WHITE);
-            px(cx + zoom - 1, cy + k, C_WHITE);
-        }
-        for (k = -1; k <= zoom; k++) {
-            px(cx + k, cy - 1, C_BLACK);
-            px(cx + k, cy + zoom, C_BLACK);
-            px(cx - 1, cy + k, C_BLACK);
-            px(cx + zoom, cy + k, C_BLACK);
-        }
+        outline(cx, cy, zoom, C_WHITE);
+        outline(cx - 1, cy - 1, zoom + 2, C_BLACK);
     } else {
         int mx = cx + (zoom >> 1), my = cy + (zoom >> 1);
         for (k = 2; k <= 6; k++) {
@@ -658,7 +652,7 @@ static void erase_cursor(void)
         paint_rect(mx, my - 6, mx, my - 1);
         paint_rect(mx, my + 1, mx, my + 6);
     }
-    if (curRing) erase_ring(curSX + (zoom >> 1), curSY + (zoom >> 1), curRing);
+    if (curRing) ring(curSX + (zoom >> 1), curSY + (zoom >> 1), curRing, UNDER);
     curSX = -100;
 }
 
@@ -715,43 +709,45 @@ bool r_follow_cursor(void)
     if ((int)cury < camy + m) camy = (int)cury - th / 3;
     if ((int)cury >= camy + th - m) camy = (int)cury - th + th / 3;
     r_clamp_cam();
-    if (ox != camx || oy != camy) {
-        fullReq = true;
-        return true;
-    }
-    return false;
+    return ox != camx || oy != camy; /* r_frame slides the picture */
 }
 
 void r_full(void)
 {
-    int tw = SCR_W >> zsh, th = vh >> zsh, rx, ry;
+    int tw, th, rx, ry, xin0, xin1;
     uint8_t *dst = VRAM + (unsigned)vy0 * SCR_W, k;
     set_zoom_info();
+    tw = SCR_W >> zsh;
+    th = vh >> zsh;
+    railOn = rail_any();
     fullReq = false;
     dqn = 0;
     sqn = 0;
+    /* screen columns of tiles that exist */
+    xin0 = camx < 0 ? -camx : 0;
+    xin1 = (int)g_W - camx;
+    if (xin1 > tw) xin1 = tw;
     for (ry = 0; ry < th; ry++) {
         int ty_ = camy + ry;
         bool anyRail = false;
-        if (ty_ < 0 || ty_ >= (int)g_H)
+        if (ty_ < 0 || ty_ >= (int)g_H || xin0 >= xin1)
             memset(line, C_VOID, SCR_W);
         else {
             tile_t row = g_rowStart[ty_];
+            const uint8_t *mp = g_map + row + camx + xin0;
             uint8_t *lp = line;
-            for (rx = 0; rx < tw; rx++) {
-                int tx_ = camx + rx;
+            if (xin0) {
+                memset(line, C_VOID, (unsigned)xin0 << zsh);
+                lp += (unsigned)xin0 << zsh;
+            }
+            for (rx = xin0; rx < xin1; rx++, mp++) {
                 uint8_t c;
-                if (tx_ < 0 || tx_ >= (int)g_W)
-                    c = C_VOID;
-                else {
-                    tile_t t = (tile_t)(row + tx_);
-                    c = tile_color(t);
-                    if (BITGET(g_railbits, t)) {
-                        if (zoom <= 2)
-                            c = C_RAIL;
-                        else
-                            anyRail = true;
-                    }
+                TILE_COLOR(mp, c);
+                if (railOn && bitget(g_railbits, (tile_t)(mp - g_map))) {
+                    if (zoom <= 2)
+                        c = C_RAIL;
+                    else
+                        anyRail = true;
                 }
                 switch (zoom) {
                 case 8: *lp++ = c; *lp++ = c; *lp++ = c; *lp++ = c; /* fallthrough */
@@ -760,14 +756,13 @@ void r_full(void)
                 default: *lp++ = c;
                 }
             }
+            if (xin1 < tw) memset(lp, C_VOID, (unsigned)(tw - xin1) << zsh);
             if (anyRail) {
                 /* same row with the rail marks in the middle of rail tiles */
                 memcpy(rline, line, SCR_W);
-                for (rx = 0; rx < tw; rx++) {
-                    int tx_ = camx + rx;
-                    if (tx_ >= 0 && tx_ < (int)g_W && BITGET(g_railbits, (tile_t)(row + tx_)))
+                for (rx = xin0; rx < xin1; rx++)
+                    if (bitget(g_railbits, (tile_t)(row + camx + rx)))
                         memset(rline + (rx << zsh) + railLo, C_RAIL, railN);
-                }
             }
         }
         for (k = 0; k < zoom; k++) {
@@ -775,14 +770,56 @@ void r_full(void)
             dst += SCR_W;
         }
     }
-    /* rows below the last whole tile */
-    for (ry = th << zsh; ry < vh; ry++) {
-        memset(dst, C_VOID, SCR_W);
-        dst += SCR_W;
-    }
+    /* the last row of tiles, cut by the bottom of the view */
+    if ((th << zsh) < vh) paint_rect(0, th << zsh, SCR_W - 1, vh - 1);
+    drawnCamX = camx;
+    drawnCamY = camy;
     memset(dcell, 1, sizeof dcell);
     overlays(true);
     cursor();
+}
+
+/* The camera moved by less than a screen: slide the picture in video memory
+ * by the same amount (whole tiles), then paint the strips that came into
+ * view and mark them so sprites cut by the old edge are drawn again.
+ * Returns false when a full redraw is cheaper. */
+static bool slide_view(void)
+{
+    int px = (camx - drawnCamX) * zoom, py = (camy - drawnCamY) * zoom;
+    int apx = px < 0 ? -px : px, apy = py < 0 ? -py : py, w = SCR_W - apx, y;
+    uint8_t *base = VRAM + (unsigned)vy0 * SCR_W;
+    unsigned dx = px < 0 ? (unsigned)-px : 0, sx = px > 0 ? (unsigned)px : 0;
+    if (apx >= SCR_W * 3 / 4 || apy >= vh * 3 / 4) return false;
+    /* new pixel (x, y) = old pixel (x + px, y + py): copy rows away from
+     * the side they move to, so no row is overwritten before it is read */
+    if (py >= 0)
+        for (y = 0; y < vh - py; y++)
+            memmove(base + (unsigned)y * SCR_W + dx, base + (unsigned)(y + py) * SCR_W + sx, w);
+    else
+        for (y = vh - 1; y >= -py; y--)
+            memmove(base + (unsigned)y * SCR_W + dx, base + (unsigned)(y + py) * SCR_W + sx, w);
+    if (px > 0) {
+        paint_rect(SCR_W - px, 0, SCR_W - 1, vh - 1);
+        mark(SCR_W - px, 0, SCR_W - 1, vh - 1);
+    } else if (px < 0) {
+        paint_rect(0, 0, -px - 1, vh - 1);
+        mark(0, 0, -px - 1, vh - 1);
+    }
+    if (py > 0) {
+        paint_rect(0, vh - py, SCR_W - 1, vh - 1);
+        mark(0, vh - py, SCR_W - 1, vh - 1);
+    } else if (py < 0) {
+        paint_rect(0, 0, SCR_W - 1, -py - 1);
+        mark(0, 0, SCR_W - 1, -py - 1);
+    }
+    /* the cursor's pixels moved with the picture */
+    if (curSX != -100) {
+        curSX -= px;
+        curSY -= py;
+    }
+    drawnCamX = camx;
+    drawnCamY = camy;
+    return true;
 }
 
 void r_frame(void)
@@ -793,6 +830,7 @@ void r_frame(void)
     int ncx, ncy, x0, y0, x1, y1;
     bool curMoved;
     PERF_START();
+    railOn = rail_any();
     if (fullReq) {
         r_full();
         PERF_ADD(9);
@@ -800,6 +838,11 @@ void r_frame(void)
     }
     memset(dcell, 0, sizeof dcell);
     memset(paintedT, 0xFF, sizeof paintedT);
+    if ((camx != drawnCamX || camy != drawnCamY) && !slide_view()) {
+        r_full();
+        PERF_ADD(9);
+        return;
+    }
     /* map under sprites that moved, changed or vanished */
     hi = drawnHi > g_unHi ? drawnHi : g_unHi;
     for (i = 0, u = g_un; i < hi; i++, u++) {
@@ -808,7 +851,8 @@ void r_frame(void)
         if (dt == U_BOOM) {
             if (u->type != U_BOOM) {
                 /* explosion over: repaint its whole area once */
-                int cx = scr_x(drawnAt[i]), cy = scr_y(drawnAt[i]), r = drawnLevel[i] * zoom + 1;
+                int cx, cy, r = drawnLevel[i] * zoom + 1;
+                scr_xy(drawnAt[i], &cx, &cy);
                 paint_rect(cx - r, cy - r, cx + r, cy + r);
                 mark(cx - r, cy - r, cx + r, cy + r);
                 drawnType[i] = 0;
@@ -817,7 +861,8 @@ void r_frame(void)
         }
         if (u->type != dt || u->pos != drawnAt[i] || i == r_sel || i == lastSel ||
             (dt == U_WARSHIP && u->hp != drawnLevel[i])) {
-            int cx = scr_x(drawnAt[i]), cy = scr_y(drawnAt[i]);
+            int cx, cy;
+            scr_xy(drawnAt[i], &cx, &cy);
             if (on_screen(cx, cy)) {
                 int bx0, by0, bx1, by1;
                 sprite_rect(dt, i == r_sel || i == lastSel, cx, cy, &bx0, &by0, &bx1, &by1);
@@ -843,7 +888,8 @@ void r_frame(void)
     }
     PERF_ADD(8);
     for (i = 0; i < sqn; i++) {
-        int cx = scr_x(sq[i]), cy = scr_y(sq[i]);
+        int cx, cy;
+        scr_xy(sq[i], &cx, &cy);
         paint_rect(cx - 9, cy - 4, cx + 9, cy + 7);
         mark(cx - 9, cy - 4, cx + 9, cy + 7);
     }
@@ -874,6 +920,40 @@ void r_frame(void)
     cursor_box(ncx, ncy, nukeRing * zoom, &x0, &y0, &x1, &y1);
     if (curMoved || touched(x0, y0, x1, y1)) cursor();
     PERF_ADD(8);
+}
+
+/* the home screen's backdrop: the map at one pixel per tile, centred in the
+ * viewport, borders and all (the margins take the panel colour) */
+void r_backdrop(void)
+{
+    uint16_t v = gfx_palette[C_VOID];
+    zoom = 1;
+    set_zoom_info();
+    railOn = false;
+    camx = 0;
+    camy = 0;
+    r_clamp_cam();
+    if ((int)g_H > vh) camy = ((int)g_H - vh) / 2;
+    gfx_palette[C_VOID] = gfx_palette[C_PANEL];
+    paint_rect(0, 0, SCR_W - 1, vh - 1);
+    gfx_palette[C_VOID] = v;
+}
+
+/* a unit's sprite at screen position (x, y), in the human's colours (help) */
+void r_icon(uint8_t type, int x, int y)
+{
+    unit_t u;
+    uint8_t oy = vy0, oh = vh;
+    memset(&u, 0, sizeof u);
+    u.type = type;
+    u.owner = u.orig = HUMAN;
+    u.hp = type == U_WARSHIP ? 100 : 1;
+    u.level = type == U_WARSHIP ? 0 : 1;
+    vy0 = 0;
+    vh = 240;
+    sprite(&u, x, y);
+    vy0 = oy;
+    vh = oh;
 }
 
 /* whole map, shrunk to fit the viewport (setup screen) */

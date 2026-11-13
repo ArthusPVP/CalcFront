@@ -6,7 +6,7 @@ attack_t g_at[MAX_ATTACKS];
 static const uint8_t terrMag[4] = {0, 80, 100, 120};
 static const uint8_t terrCost2[4] = {0, 33, 40, 50}; /* tileCost * 2 */
 
-static uint8_t own_nbrs(tile_t t, uint8_t p)
+FORCE_INLINE uint8_t own_nbrs(tile_t t, uint8_t p)
 {
     uint8_t i, n = 0;
     for (i = 0; i < 4; i++) {
@@ -15,6 +15,21 @@ static uint8_t own_nbrs(tile_t t, uint8_t p)
     }
     return n;
 }
+
+/* first tile from p to end (inclusive) that is land of player o, or 0. On
+ * the calculator this is hand-written assembly (src/asm/scan.s). */
+#ifdef HOST
+static const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o)
+{
+    for (; p <= end; p++) {
+        uint8_t b = *p;
+        if ((b & T_OWNER) == o && (b & T_TERR)) return p;
+    }
+    return 0;
+}
+#else
+const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o);
+#endif
 
 /* Sample the frontier (tiles of `def` touching `att`) into the ring.
  * With stopAtFirst it only answers "is there a border at all". */
@@ -41,9 +56,8 @@ static uint16_t scan_front(attack_t *a, uint8_t att, uint8_t def, bool stopAtFir
     for (y = y0;; y++) {
         tile_t t0 = g_rowStart[y];
         const uint8_t *p = g_map + t0 + x0, *end = g_map + t0 + x1;
-        for (; p <= end; p++) {
-            uint8_t b = *p, nb;
-            if ((b & T_OWNER) != def || !IS_LAND(b)) continue;
+        while ((p = next_owned(p, end, def))) {
+            uint8_t nb;
             /* touches the attacker? (inline: this is the hottest loop) */
             nb = p[1];
             if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) {
@@ -52,7 +66,10 @@ static uint16_t scan_front(attack_t *a, uint8_t att, uint8_t def, bool stopAtFir
                     nb = p[W];
                     if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) {
                         nb = p[-W];
-                        if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) continue;
+                        if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) {
+                            p++;
+                            continue;
+                        }
                     }
                 }
             }
@@ -67,6 +84,7 @@ static uint16_t scan_front(attack_t *a, uint8_t att, uint8_t def, bool stopAtFir
                 }
             }
             n++;
+            p++;
         }
         if (y == y1) break;
     }
@@ -87,21 +105,23 @@ static uint16_t scan_front(attack_t *a, uint8_t att, uint8_t def, bool stopAtFir
 
 bool borders(uint8_t att, uint8_t def) { return scan_front(0, att, def, true) != 0; }
 
+/* loops over attacks walk a pointer: indexing a 274-byte record multiplies */
+#define FOR_ATTACKS(a) for (a = g_at; a < g_at + MAX_ATTACKS; a++)
+
 bool attacking(uint8_t att, uint8_t def)
 {
-    uint8_t i;
-    for (i = 0; i < MAX_ATTACKS; i++)
-        if (g_at[i].active && g_at[i].att == att && g_at[i].def == def) return true;
+    const attack_t *a;
+    FOR_ATTACKS(a)
+        if (a->active && a->att == att && a->def == def) return true;
     return false;
 }
 
 uint32_t incoming_troops(uint8_t p, uint8_t *from)
 {
-    uint8_t i;
+    const attack_t *a;
     uint32_t sum = 0, best = 0;
     if (from) *from = 0;
-    for (i = 0; i < MAX_ATTACKS; i++) {
-        attack_t *a = &g_at[i];
+    FOR_ATTACKS(a) {
         if (a->active && a->def == p && !a->retreat) {
             sum += a->troops;
             if (a->troops >= best) {
@@ -115,16 +135,14 @@ uint32_t incoming_troops(uint8_t p, uint8_t *from)
 
 bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwner)
 {
-    uint8_t i;
-    attack_t *a = 0;
+    attack_t *a = 0, *o;
     player_t *pl = &g_pl[att];
     if (att == def || !pl->alive) return false;
     if (def && (!g_pl[def].alive || ALLIED(att, def))) return false;
     if (removeFromOwner && troops > pl->troops) troops = pl->troops;
     if (troops < 10) return false;
 
-    for (i = 0; i < MAX_ATTACKS; i++) {
-        attack_t *o = &g_at[i];
+    FOR_ATTACKS(o) {
         if (!o->active) {
             if (!a) a = o;
             continue;
@@ -139,13 +157,16 @@ bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwne
     a->att = att;
     a->def = def;
     a->border = 0;
-    if (!scan_front(a, att, def, false)) return false;
+    {
+        uint16_t found;
+        PROF(0, found = scan_front(a, att, def, false));
+        if (!found) return false;
+    }
     if (removeFromOwner) pl->troops -= troops;
 
     /* opposing attack: the two stacks cancel out */
     if (def)
-        for (i = 0; i < MAX_ATTACKS; i++) {
-            attack_t *o = &g_at[i];
+        FOR_ATTACKS(o) {
             if (o->active && o->att == def && o->def == att && !o->retreat) {
                 if (o->troops > troops) {
                     o->troops -= troops;
@@ -169,16 +190,15 @@ bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwne
 
 void attack_retreat(uint8_t att, uint8_t def)
 {
-    uint8_t i;
-    for (i = 0; i < MAX_ATTACKS; i++)
-        if (g_at[i].active && g_at[i].att == att && g_at[i].def == def) g_at[i].retreat = 1;
+    attack_t *a;
+    FOR_ATTACKS(a)
+        if (a->active && a->att == att && a->def == def) a->retreat = 1;
 }
 
 void attacks_drop_player(uint8_t p)
 {
-    uint8_t i;
-    for (i = 0; i < MAX_ATTACKS; i++) {
-        attack_t *a = &g_at[i];
+    attack_t *a;
+    FOR_ATTACKS(a) {
         if (!a->active) continue;
         if (a->att == p)
             a->active = 0;
@@ -240,8 +260,10 @@ static void run_attack(attack_t *a)
         return;
     }
     if (a->count == 0 || --a->rescan == 0) {
+        uint16_t found;
         a->rescan = 24;
-        if (!scan_front(a, att, def, false)) {
+        PROF(0, found = scan_front(a, att, def, false));
+        if (!found) {
             end_attack(a, 0);
             return;
         }
@@ -340,7 +362,7 @@ static void run_attack(attack_t *a)
         a->count--;
         taken++;
         if (def) sub_troops(def, dloss);
-        conquer(t, att);
+        PROF(1, conquer(t, att));
         if (!a->active) return; /* defender died: troops already refunded */
         for (i = 0; i < 4 && a->count < RING; i++) {
             tile_t n = (tile_t)(t + g_dirofs[i]);
@@ -371,7 +393,7 @@ static void run_attack(attack_t *a)
 
 void attack_tick(void)
 {
-    uint8_t i;
-    for (i = 0; i < MAX_ATTACKS; i++)
-        if (g_at[i].active) run_attack(&g_at[i]);
+    attack_t *a;
+    FOR_ATTACKS(a)
+        if (a->active) run_attack(a);
 }

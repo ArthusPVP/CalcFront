@@ -29,8 +29,10 @@ player) and `plat_map_*` (load map files).
 | Tile map, 1 byte per tile | unused back half of video RAM (`0xD52C00`) | ≤ 64,000 B |
 | Building bitmap, 1 bit per tile | right after the map (`0xD62C00`) | 8 KB |
 | Railway bitmap + route-search scratch (`sim_mem_t`) | temporary `CFTMP` AppVar in user RAM | 20 KB |
-| Everything else (players, attacks, units, caches) | static RAM (BSS) | ~40 KB |
-| Program code | user RAM, decompressed at launch | ~98 KB |
+| Everything else (players, attacks, units, caches, coarse route guide) | static RAM (BSS) | ~47 KB |
+| Saved game | AppVars `CFSAVE0`, `CFSAVE1`... (8 KB each, archived when possible) | ~10 KB |
+| Pro mode setting | AppVar `CFSET` | 1 B |
+| Program code | user RAM, decompressed at launch | ~113 KB |
 
 **Tile byte:** bits 5–6 terrain (0 water, 1 plains, 2 highland, 3 mountain).
 Land: bits 0–4 owner (0 = nobody), bit 7 fallout. Water: bits 0–2 water body
@@ -45,11 +47,12 @@ exist. Tiles are indexed `y * width + x` (`tile_t`, 16-bit; `0xFFFF` = none).
 | `sim.h` | All shared types and declarations: tiles, players, attacks, units, events, the scratch block, and shift-free inline helpers (`tx`, `ty`, `bitget`, `bitset`). |
 | `tile_tab.h`, `fx_tab.h` | Generated lookup tables (bitmap indices, log2 and exp2 mantissas). |
 | `fx.c` | Fixed-point math (`fx_log2`, `fx_exp2`, `fx_pow` for OpenFront's `^0.6` and `^0.73`), random numbers (an 8-bit Jenkins generator), distances. Written with byte operations, because multi-bit shifts are slow loops on the eZ80. |
-| `map.c` | Map file loading (header, size variants, nation list), ownership changes (`conquer`, `relinquish`), coastline queries, player bounding boxes and neighbours, straight lines, and ship routes: greedy best-first search over one water body with a shared cache of routes. |
-| `game.c` | Game setup and spawning, the per-tick economy (troop cap, troop growth, gold, multipliers), player death, the win check, and `game_tick()`, which runs every system in order. |
+| `map.c` | Map file loading (header, size variants, nation list; the land total is counted from the tiles), ownership changes (`conquer`, `relinquish`), coastline queries, player bounding boxes and neighbours, straight lines, and ship routes: a greedy best-first search over one water body with a shared cache of routes. Long searches are guided by a coarse map of 8×8-tile cells: a breadth-first search over (cell, pool of water) from the goal gives each cell its distance, and the tile search expands the tile with the fewest cells left. Cells split by a headland keep a 2-bit pool number per tile so the guide never jumps across an isthmus. |
+| `save.c` | Saving and resuming: core values, players, active attacks, units, then the owner and fallout of every land tile, run-length coded. Water, terrain, the structure bitmap, railways, ship routes and per-tick caches are rebuilt on load. The bytes go through `plat_save_write` / `plat_save_read`. |
+| `game.c` | Game setup and spawning, the per-tick economy (troop cap, troop growth, gold, multipliers), player death, the land share (0.01%, from a cached reciprocal of the land left), the win check, and `game_tick()`, which runs every system in order. |
 | `attack.c` | Land attacks: finds the front between two players, keeps a ring of 128 front tiles, and takes tiles with OpenFront's cost and loss formulas (terrain, defense posts, fallout, big-empire and traitor modifiers), cached per terrain type each tick. |
 | `units.c` | The unit table (200 slots) shared by every unit type, building rules and prices, upgrades, capture on conquest, per-player counts cached each tick, nukes and SAM interception, and `units_tick()`, which dispatches each unit to its update function. |
-| `ships.c` | Transport boats (land and start an attack), ports and trade ships (OpenFront's spawn odds and weighted destinations, gold by distance), warships (targets, shells, health, repair at port, veterancy, capturing trade ships, player orders). |
+| `ships.c` | Transport boats (land on the target's nearest coast that faces a sea the attacker touches, then start an attack), ports and trade ships (OpenFront's spawn odds and weighted destinations, gold by distance), warships (targets, shells, health, repair at port, veterancy, capturing trade ships, player orders). |
 | `rail.c` | Factories turn nearby cities, ports and factories into stations, links them with straight railways over land, sends trains to random reachable stops, and pays gold at each stop. Only changed track is repainted. |
 | `diplo.c` | Relations, alliance requests and expiry, betrayal and traitor status. |
 | `ai.c` | Tribes (expand, retaliate, pick random neighbours) and nations (build economy and navy, nuke leaders, boat to weak overseas rivals, ask for help, betray on Hard and Impossible). Each AI thinks on its own staggered schedule. |
@@ -62,22 +65,28 @@ needed → AI → diplomacy every 16 ticks → win check every 32 ticks.
 
 | File | Role |
 |---|---|
-| `main.c` | Key scanning with real-time auto-repeat, the title, help, setup, leaderboard and pause screens, the five action keys and their menus, player actions (attack, boat, build, nuke, diplomacy, warship orders), event messages, map discovery (`ti_Detect` on the `CFM2` signature), the scratch AppVar, and the game loop: run the ticks that are due, then draw. |
-| `ce/render.c` | Draws the map straight into video memory. A full redraw happens only when the camera moves; otherwise each frame repaints only tiles that changed, the area under sprites that moved, and sprites or buildings that a 16×16 dirty-cell grid says were painted over. Sprites are pre-built masks. Also the cursor, nuke rings, explosion rings and the setup preview. |
-| `ce/hud.c` | Number formatting (troops shown /10 like OpenFront), the troop bar, the info line and the action-key bar. |
+| `main.c` | Key scanning with real-time auto-repeat, the title, help, setup (with the Konami code for pro mode), info (your nation, leaderboard) and pause screens, the five action keys and their menus, player actions (attack, boat, build, nuke, diplomacy, warship orders), event messages, map discovery (`ti_Detect` on the `CFM2` signature), the scratch AppVar, saved games split over 8 KB AppVars, and the game loop: run the ticks that are due, then draw. |
+| `ce/render.c` | Draws the map straight into video memory. When the camera moves by less than a screen, the picture already drawn slides by a block copy and only the strips that came into view are painted; a full redraw happens on zoom changes and big jumps. Otherwise each frame repaints only tiles that changed, the area under sprites that moved, and sprites or buildings that a 16×16 dirty-cell grid says were painted over. Sprites are pre-built masks (ships: x for boats, dot for trade, + for warships); trade ships and trains are skipped at zoom 1. Also the cursor, nuke rings, explosion rings and the setup preview. |
+| `ce/hud.c` | Number formatting (troops shown /10 like OpenFront, percentages, times), the screen layout for normal and pro mode, the status bar, the info line and the action-key bar. Each part remembers what it shows and is redrawn only when that changes. |
 | `ce/ui.h` | Palette indices, screen layout, renderer and HUD declarations. |
 
 ## Other folders
 
 | Path | Role |
 |---|---|
-| `host/` | PC harness: runs the core with AIs on every side, checks the whole game state every 128 ticks under AddressSanitizer and UBSan, and can dump frames as images. |
+| `host/` | PC harness: runs the core with AIs on every side, checks the whole game state every 128 ticks under AddressSanitizer and UBSan (including the land share), can save and reload a game mid-run and compare the state (`CF_SAVE`), reports route-search statistics, and can dump frames as images. |
 | `tools/mapconv.py` | Converts OpenFront maps into CalcFront files: downscales, classifies terrain, labels water bodies, snaps nation positions, builds Normal and Large variants, compresses with ZX0, writes `maps/calc`, `maps/pc` and `maps/preview`. |
 | `tools/fetch_maps.sh` | Downloads the OpenFront map sources into `vendor/`. |
 | `tools/cemu_run.py`, `tools/cemu-headless-launch.patch` | Plays key scripts in a headless CEmu and saves screenshots. |
 | `maps/` | Map AppVars, previews and their CC BY-SA licence. |
 | `packaging/` | Text shipped in the release zip and the release notes. |
 | `.github/workflows/build.yml` | Builds, packages and publishes `CalcFront.zip`. |
+
+**Save (`CFSAVEn`):** the front end's header (`CFS1`, map AppVar name, zoom,
+speed, cursor), then `save.c`'s stream (`CFG1`, core values, players, active
+attacks without their front sample, units, run-length coded land tiles,
+`CFG1`). A part is archived only if that needs no garbage collect: the OS
+would ask about it on a 16-bit screen and wipe the map in video memory.
 
 **Map file (`CFM2`):** name, compression flag, then for each size variant its
 width, height, land tile count, scale (original tiles per CalcFront tile ×16)

@@ -6,7 +6,7 @@
 /* Bob Jenkins' small fast 8-bit generator: only byte operations */
 static uint8_t ra = 0xF1, rb = 0x37, rc = 0x91, rd = 0x5C;
 
-static uint8_t rnd8(void)
+FORCE_INLINE uint8_t rnd8(void)
 {
     uint8_t e = (uint8_t)(ra - (uint8_t)((rb << 1) | (rb >> 7)));
     ra = (uint8_t)(rb ^ (uint8_t)((rc << 4) | (rc >> 4)));
@@ -26,13 +26,33 @@ void rnd_seed(uint32_t s)
     for (i = 0; i < 32; i++) rnd8();
 }
 
+void rnd_get(uint8_t *s)
+{
+    s[0] = ra;
+    s[1] = rb;
+    s[2] = rc;
+    s[3] = rd;
+}
+
+void rnd_set(const uint8_t *s)
+{
+    ra = s[0];
+    rb = s[1];
+    rc = s[2];
+    rd = s[3];
+}
+
 uint16_t rnd(void) { return (uint16_t)(rnd8() | ((uint16_t)rnd8() << 8)); }
 
 uint16_t rnd_n(uint16_t n)
 {
+    u16b_t r;
     if (n < 2) return 0;
-    if (n <= 256) return (uint16_t)(((uint24_t)rnd() * n) >> 16); /* fits in 24 bits */
-    return (uint16_t)(((uint32_t)rnd() * n) >> 16);
+    r.v = rnd();
+    if (n <= 256) return (uint16_t)(((uint24_t)r.v * n) >> 16); /* fits in 24 bits */
+    /* (r * n) >> 16 with r = hi * 256 + lo, in 24-bit steps: the dropped low
+     * byte of lo * n can never carry into the result */
+    return (uint16_t)(((uint24_t)r.b[1] * n + (((uint24_t)r.b[0] * n) >> 8)) >> 8);
 }
 
 typedef union {
@@ -66,27 +86,17 @@ uint16_t fx_log2(uint32_t x)
 uint32_t fx_exp2(int16_t l)
 {
     u16b_t u;
-    u32b_t m;
+    uint24_t m;
     uint8_t ip;
     if (l < 0) return 0;
     u.v = (uint16_t)l;
     ip = u.b[1];
-    m.v = fx_exptab[u.b[0]]; /* Q15 mantissa */
+    m = fx_exptab[u.b[0]]; /* Q15 mantissa, 16 bits */
     if (ip >= 15) {
         if (ip > 30) return 0xFFFFFFFFu;
-        for (ip -= 15; ip; ip--) m.v += m.v;
-        return m.v;
+        return (uint32_t)m << (ip - 15);
     }
-    ip = (uint8_t)(15 - ip);
-    while (ip >= 8) {
-        m.b[0] = m.b[1];
-        m.b[1] = m.b[2];
-        m.b[2] = m.b[3];
-        m.b[3] = 0;
-        ip -= 8;
-    }
-    for (; ip; ip--) m.v >>= 1;
-    return m.v;
+    return m >> (15 - ip); /* one 24-bit shift instead of a 32-bit loop */
 }
 
 uint32_t fx_pow(uint32_t x, uint8_t p8)
@@ -110,24 +120,32 @@ uint16_t isqrt32(uint32_t v)
     return (uint16_t)r;
 }
 
+/* dx, dy between two tiles: one row lookup per tile (tx() alone does one) */
+FORCE_INLINE void delta(tile_t a, tile_t b, int *dx, int *dy)
+{
+    int ya = ty(a), yb = ty(b);
+    *dx = (int)(a - g_rowStart[ya]) - (int)(b - g_rowStart[yb]);
+    *dy = ya - yb;
+}
+
 uint16_t tdist(tile_t a, tile_t b)
 {
-    int16_t dx = (int16_t)tx(a) - (int16_t)tx(b);
-    int16_t dy = (int16_t)ty(a) - (int16_t)ty(b);
+    int dx, dy;
+    delta(a, b, &dx, &dy);
     return isqrt32((uint32_t)((int32_t)dx * dx + (int32_t)dy * dy));
 }
 
 uint16_t mdist(tile_t a, tile_t b)
 {
-    int16_t dx = (int16_t)tx(a) - (int16_t)tx(b);
-    int16_t dy = (int16_t)ty(a) - (int16_t)ty(b);
+    int dx, dy;
+    delta(a, b, &dx, &dy);
     return (uint16_t)((dx < 0 ? -dx : dx) + (dy < 0 ? -dy : dy));
 }
 
 bool near(tile_t a, tile_t b, uint8_t r)
 {
-    int16_t dx = (int16_t)tx(a) - (int16_t)tx(b);
-    int16_t dy = (int16_t)ty(a) - (int16_t)ty(b);
+    int dx, dy;
+    delta(a, b, &dx, &dy);
     if (dx < 0) dx = -dx;
     if (dy < 0) dy = -dy;
     if (dx > r || dy > r) return false;

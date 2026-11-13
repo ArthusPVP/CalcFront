@@ -46,7 +46,7 @@ static uint8_t pick_neighbor(uint8_t p, bool tribeStyle)
     for (i = 1; i <= g_nplayers; i++) {
         player_t *o = &g_pl[i];
         uint32_t score;
-        if (!(mask & BIT(i)) || !o->alive || i == p) continue;
+        if (!MASKBIT(mask, i) || !o->alive || i == p) continue;
         if (tribeStyle) {
             if (o->type != PT_TRIBE && (rnd() & 1)) continue;
             score = rnd();
@@ -75,13 +75,13 @@ static void answer_requests(uint8_t p)
     if (!pl->reqFrom) return;
     for (i = 1; i <= g_nplayers; i++) {
         bool yes;
-        if (!(pl->reqFrom & BIT(i))) continue;
+        if (!MASKBIT(pl->reqFrom, i)) continue;
         if (pl->type == PT_TRIBE)
             yes = true;
         else {
             yes = pl->rel[i] > -15 && !attacking(i, p) && !g_pl[i].traitor;
             /* a strong nation would rather eat a weak neighbour */
-            if (yes && g_cfg.difficulty >= DIFF_HARD && (pl->nbrs & BIT(i)) &&
+            if (yes && g_cfg.difficulty >= DIFF_HARD && MASKBIT(pl->nbrs, i) &&
                 g_pl[i].troops < pl->troops / 3)
                 yes = false;
             if (yes && attacking(p, i) && pl->troops > g_pl[i].troops) yes = false;
@@ -299,15 +299,24 @@ static void nation_nuke(uint8_t p)
     if (target != NO_TILE) launch_nuke(p, type, target);
 }
 
+/* land tile on a sea in `seas` (bit c = water body c) */
+static bool shore_on(tile_t t, uint8_t seas)
+{
+    uint8_t c = shore_comp(t);
+    return c && (seas & (uint8_t)(1 << c));
+}
+
 static void nation_boat(uint8_t p)
 {
     player_t *pl = &g_pl[p];
-    uint8_t tries = 24, i, victim = 0;
+    uint8_t tries = 24, i, victim = 0, seas;
     tile_t best = NO_TILE;
     uint16_t bd = 0xFFFF;
     uint32_t vt = 0xFFFFFFFF, limit;
     tile_t home = TILE((pl->minx + pl->maxx) / 2, (pl->miny + pl->maxy) / 2);
     if (pl->boats >= 1 + (g_cfg.difficulty >= DIFF_HARD)) return;
+    seas = coast_bodies(p); /* only aim at coasts on seas we can sail */
+    if (!seas) return;
 
     /* an overseas rival: the weakest one we can take on */
     limit = pl->troops >= pl->maxTroops - pl->maxTroops / 10 ? pl->troops : pl->troops / 2;
@@ -323,7 +332,7 @@ static void nation_boat(uint8_t p)
         player_t *o = &g_pl[victim];
         for (i = 0; i < 40; i++) {
             tile_t t = TILE(o->minx + rnd_n(o->maxx - o->minx + 1), o->miny + rnd_n(o->maxy - o->miny + 1));
-            if (IS_LAND(g_map[t]) && OWNER_OF(t) == victim && is_shore(t)) {
+            if (IS_LAND(g_map[t]) && OWNER_OF(t) == victim && shore_on(t, seas)) {
                 if (launch_boat(p, t, pl->troops / 3)) return;
                 break;
             }
@@ -333,7 +342,7 @@ static void nation_boat(uint8_t p)
         tile_t t = random_land();
         uint8_t o;
         uint16_t d;
-        if (t == NO_TILE || !is_shore(t)) continue;
+        if (t == NO_TILE || !shore_on(t, seas)) continue;
         o = OWNER_OF(t);
         if (o == p || (o && ALLIED(p, o))) continue;
         if (o && g_pl[o].troops > pl->troops / 2) continue;
@@ -365,9 +374,9 @@ static void nation_think(uint8_t p)
         if (diff >= DIFF_MEDIUM) pl->embargo |= BIT(from);
     }
 
-    nation_build(p);
-    if ((pl->aiTurn & 3) == 0) nation_navy(p);
-    if (diff >= DIFF_MEDIUM) nation_nuke(p);
+    PROF(8, nation_build(p));
+    if ((pl->aiTurn & 3) == 0) PROF(10, nation_navy(p));
+    if (diff >= DIFF_MEDIUM) PROF(10, nation_nuke(p));
 
     pct = pl->troops / ((pl->maxTroops / 100) + 1);
 
@@ -376,7 +385,7 @@ static void nation_think(uint8_t p)
         uint8_t i;
         for (i = 1; i <= g_nplayers; i++)
             if (i != p && i != from && g_pl[i].alive && g_pl[i].type != PT_TRIBE &&
-                !ALLIED(p, i) && pl->rel[i] >= 0 && (pl->nbrs & BIT(i))) {
+                !ALLIED(p, i) && pl->rel[i] >= 0 && MASKBIT(pl->nbrs, i)) {
                 ally_request(p, i);
                 break;
             }
@@ -407,13 +416,13 @@ static void nation_think(uint8_t p)
         }
     }
     /* nothing to do on land: go overseas */
-    if ((!pl->nbrs || !target) && !pl->nbrTN && pct >= 60) nation_boat(p);
+    if ((!pl->nbrs || !target) && !pl->nbrTN && pct >= 60) PROF(9, nation_boat(p));
 
     /* occasional treachery on the higher difficulties */
     if (diff >= DIFF_HARD && !target && pl->allies && (rnd() & 15) == 0) {
         uint8_t i;
         for (i = 1; i <= g_nplayers; i++)
-            if (ALLIED(p, i) && (pl->nbrs & BIT(i)) && g_pl[i].troops < pl->troops / 3) {
+            if (ALLIED(p, i) && MASKBIT(pl->nbrs, i) && g_pl[i].troops < pl->troops / 3) {
                 ally_break(p, i);
                 pl->aiEnemy = i;
                 break;
@@ -433,7 +442,7 @@ void ai_tick(void)
         }
         if (pl->type == PT_TRIBE) {
             pl->aiWait = (uint8_t)(5 + rnd_n(6));
-            tribe_think(p);
+            PROF(11, tribe_think(p));
         } else if (pl->type == PT_NATION) {
             pl->aiWait = thinkEvery[g_cfg.difficulty];
             nation_think(p);

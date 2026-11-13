@@ -24,15 +24,26 @@ WHAT IS IN THIS ZIP
      arTIfiCE (https://yvantt.github.io/arTIfiCE/) brings them back; check its
      page for the OS versions it supports.
 
-   The game needs about 120 KB of free RAM while it runs (98 KB for the program,
-   20 KB of work memory). Archive other programs if you get "Not enough free RAM"
-   or a memory error.
+   The game needs about 135 KB of free RAM while it runs (113 KB for the
+   program, 20 KB of work memory). Archive other programs if you get "Not
+   enough free RAM" or a memory error.
 
 CONTROLS
   arrows          move the cursor        8 4 6 2   scroll the map
   + / -           zoom in / out          clear     back / pause
   y= window zoom trace graph   the 5 action keys shown on the bottom bar
   enter           attack the land under the cursor
+  More > Info     your stats (troops out, alliances, attacks) and the ranks
+
+SAVING
+  Pause with [clear], then [zoom] (Save). The game goes into the AppVars
+  CFSAVE0, CFSAVE1... in the archive. On the title screen, [window]
+  (Continue) picks it up again.
+
+PRO MODE
+  On the New game screen: up up down down left right left right, then [apps]
+  and [math] (B and A). Every number shows on screen; the same code turns it
+  off.
 
 LICENCES
   CalcFront code: GNU AGPL-3.0 (see LICENSE.txt). Source code:

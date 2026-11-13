@@ -29,7 +29,7 @@ static uint32_t troop_mul(uint32_t t)
 
 bool can_trade(uint8_t a, uint8_t b)
 {
-    return !(g_pl[a].embargo & BIT(b)) && !(g_pl[b].embargo & BIT(a));
+    return !MASKBIT(g_pl[a].embargo, b) && !MASKBIT(g_pl[b].embargo, a);
 }
 
 #define TROOP_CAP 60000000UL
@@ -98,10 +98,39 @@ void sub_troops(uint8_t p, uint32_t n)
     pl->troops = pl->troops > n ? pl->troops - n : 0;
 }
 
-uint16_t land_pct10(uint8_t p)
+/* Share of the land in 0.01%. g_landLeft counts land tiles only (water and
+ * lakes never), minus fallout, like OpenFront's win check. Instead of a
+ * 32-bit division per call, a 16.16 reciprocal is kept and refreshed only
+ * when g_landLeft changes (a nuke or a fallout tile taken back). */
+static uint16_t pctLand;
+static uint32_t pctMul;
+
+uint16_t land_pct100(uint8_t p)
 {
-    if (!g_landLeft) return 0;
-    return (uint16_t)(((uint32_t)g_pl[p].tiles * 1000) / g_landLeft);
+    if (g_landLeft != pctLand) {
+        pctLand = g_landLeft;
+        pctMul = pctLand ? (10000UL << 16) / pctLand : 0;
+    }
+    /* tiles <= g_landLeft, so tiles * pctMul <= 10000 << 16: no overflow */
+    return (uint16_t)(((uint32_t)g_pl[p].tiles * pctMul + 0x8000) >> 16);
+}
+
+uint16_t land_pct10(uint8_t p) { return (uint16_t)((land_pct100(p) + 5) / 10); }
+
+/* a fingerprint of the game state, to compare a calculator run with the PC */
+uint16_t sim_checksum(void)
+{
+    uint16_t t, n = (uint16_t)(g_W * g_H);
+    uint8_t a = 0, b = 0, p;
+    for (t = 0; t < n; t++) {
+        a += g_map[t];
+        b += a;
+    }
+    for (p = 1; p <= g_nplayers; p++) {
+        a += (uint8_t)g_pl[p].troops ^ (uint8_t)g_pl[p].gold;
+        b += a;
+    }
+    return (uint16_t)(b << 8 | a);
 }
 
 uint8_t add_player(uint8_t type, const char *name)
@@ -133,6 +162,8 @@ void game_new(const game_cfg_t *cfg, uint32_t seed)
     g_winner = 0;
     g_mirvs = 0;
     g_landLeft = g_mi.land;
+    path_prepare();
+    coast_rebuild();
     s = g_mi.scale16 >> 4;
     if (s < 12) s = 12;
     if (s > 40) s = 40;
@@ -260,7 +291,7 @@ static void economy(uint8_t p)
     uint32_t add, max = pl->maxTroops, tr = pl->troops;
 
     if (((g_tick + p) & 15) == 0) {
-        calc_max(p);
+        PROF(2, calc_max(p));
         max = pl->maxTroops;
         if (pl->traitor) pl->traitor = pl->traitor > 16 ? pl->traitor - 16 : 0;
     }
@@ -273,7 +304,8 @@ static void economy(uint8_t p)
          * unscaled game would, then scale the result */
         uint16_t m = g_mulQ8[g_cfg.troopMul];
         uint32_t trn = m == 256 ? tr : (tr / m) << 8;
-        add = 10 + (fx_pow(trn, 187) >> 2);
+        /* x^0.73 < 2^24 for any 32-bit x: shift it as a 24-bit value */
+        add = 10 + ((uint24_t)fx_pow(trn, 187) >> 2);
         if (add < 65536) {
             union {
                 uint24_t v;
@@ -288,8 +320,10 @@ static void economy(uint8_t p)
             add = (add * r8) >> 8;
         if (pl->type == PT_TRIBE)
             add >>= 1;
-        else if (pl->type == PT_NATION)
-            add = (add * growMul[g_cfg.difficulty]) >> 8;
+        else if (pl->type == PT_NATION) {
+            uint16_t gm = growMul[g_cfg.difficulty];
+            add = add < 62000 ? ((uint24_t)add * gm) >> 8 : (add * gm) >> 8; /* 24 bits when it fits */
+        }
         if (m != 256) add = troop_mul(add);
         add++;
         if (tr + add > max) add = max - tr;

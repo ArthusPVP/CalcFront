@@ -1,11 +1,13 @@
 /* PC harness: runs the CalcFront simulation natively for testing.
  *   cfhost <map-id> <difficulty> <nations> <tribes> <ticks> <seed> [frameEvery] [outdir]
  * Environment: CF_SIZE=1 large map, CF_GOLD / CF_TROOPS = multiplier index (1 = x1),
- *              CF_QUIET=1 one summary line only.
+ *              CF_QUIET=1 one summary line only,
+ *              CF_SAVE=n save at tick n, load it back, compare the state, go on.
  * Player 1 (normally the human) is driven by the nation AI here. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <stddef.h>
 #include "../src/sim/sim.h"
 
 static uint8_t mapmem[65536], stmem[8192];
@@ -17,6 +19,7 @@ static uint8_t filebuf[140000];
 static size_t filelen;
 static const char *mapid;
 static unsigned long ndirty, nevents[32];
+
 
 void ui_dirty(tile_t t) { (void)t; ndirty++; }
 void ui_dirty_unit(tile_t t) { (void)t; ndirty++; }
@@ -45,6 +48,76 @@ void plat_map_tiles(const uint8_t *data, uint16_t ntiles, uint8_t comp)
         exit(1);
     }
     memcpy(g_map, data, ntiles);
+}
+
+/* save stream in memory */
+static uint8_t savebuf[70000];
+static size_t savelen, savepos;
+
+bool plat_save_write(const void *p, uint16_t n)
+{
+    if (savelen + n > sizeof savebuf) return false;
+    memcpy(savebuf + savelen, p, n);
+    savelen += n;
+    return true;
+}
+
+bool plat_save_read(void *p, uint16_t n)
+{
+    if (savepos + n > savelen) return false;
+    memcpy(p, savebuf + savepos, n);
+    savepos += n;
+    return true;
+}
+
+/* save, reload and check that nothing was lost */
+static void save_roundtrip(void)
+{
+    static uint8_t map0[65536];
+    static player_t pl0[MAXP];
+    static unit_t un0[MAX_UNITS];
+    static attack_t at0[MAX_ATTACKS];
+    unsigned i, n = (unsigned)g_W * g_H;
+    uint24_t tick0 = g_tick;
+    savelen = savepos = 0;
+    if (!game_save()) {
+        printf("!! save failed\n");
+        exit(1);
+    }
+    memcpy(map0, g_map, n);
+    memcpy(pl0, g_pl, sizeof pl0);
+    memcpy(un0, g_un, sizeof un0);
+    memcpy(at0, g_at, sizeof at0);
+    /* wreck the state, as a fresh start would */
+    memset(g_pl, 0xA5, sizeof g_pl);
+    memset(g_un, 0x5A, sizeof g_un);
+    memset(g_at, 0x33, sizeof g_at);
+    if (!game_load(0)) {
+        printf("!! load failed\n");
+        exit(1);
+    }
+    if (memcmp(map0, g_map, n) || memcmp(pl0, g_pl, sizeof pl0) || g_tick != tick0) {
+        printf("!! map, players or tick differ after loading\n");
+        exit(1);
+    }
+    for (i = 0; i < MAX_UNITS; i++) {
+        unit_t a = un0[i], b = g_un[i];
+        if (a.type == U_NONE && b.type == U_NONE) continue; /* free slots keep no data */
+        a.path = b.path = 0;
+        if (IS_SHIP(a.type)) a.timer2 = b.timer2 = 0;
+        if (IS_STATIONABLE(a.type)) a.aux |= 1, b.aux |= 1; /* railways are rebuilt on load */
+        if (memcmp(&a, &b, sizeof a)) {
+            printf("!! unit %u differs after loading (hi %u): type %u/%u aux %u/%u level %u/%u hp %u/%u pos %u/%u\n", i, g_unHi,
+                   a.type, b.type, a.aux, b.aux, a.level, b.level, a.hp, b.hp, a.pos, b.pos);
+            exit(1);
+        }
+    }
+    for (i = 0; i < MAX_ATTACKS; i++)
+        if (at0[i].active && memcmp(&at0[i], &g_at[i], offsetof(attack_t, head))) {
+            printf("!! attack %u differs after loading\n", i);
+            exit(1);
+        }
+    printf("  save at t=%us: %u bytes, loaded back identical\n", (unsigned)tick0 / 10, (unsigned)savelen);
 }
 
 static void pcolor(uint8_t p, uint8_t *rgb)
@@ -156,6 +229,32 @@ static void check(void)
             exit(1);
         }
     }
+    {
+        /* cached coasts against a full scan */
+        static uint8_t seas[MAXP];
+        memset(seas, 0, sizeof seas);
+        for (i = 0; i < (unsigned)g_H * g_W; i++) {
+            uint8_t b = g_map[i], k;
+            if (!IS_LAND(b) || !(b & T_OWNER)) continue;
+            for (k = 0; k < 4; k++) {
+                uint8_t nb = g_map[(tile_t)(i + g_dirofs[k])];
+                if (!IS_LAND(nb) && (nb & T_COMP)) seas[b & T_OWNER] |= (uint8_t)(1 << (nb & T_COMP));
+            }
+        }
+        for (i = 1; i <= g_nplayers; i++)
+            if (seas[i] != coast_bodies((uint8_t)i)) {
+                printf("!! coast of p%u: %02x vs scan %02x\n", i, coast_bodies((uint8_t)i), seas[i]);
+                exit(1);
+            }
+    }
+    for (i = 1; i <= g_nplayers; i++) {
+        unsigned exact = (unsigned)(((unsigned long)cnt[i] * 10000 + g_landLeft / 2) / g_landLeft);
+        unsigned got = land_pct100((uint8_t)i);
+        if (got + 1 < exact || got > exact + 1) {
+            printf("!! land share p%u: %u vs exact %u\n", i, got, exact);
+            exit(1);
+        }
+    }
     if (land - fall != g_landLeft) {
         printf("!! landLeft mismatch %u vs %u\n", land - fall, g_landLeft);
         exit(1);
@@ -190,7 +289,7 @@ static int envi(const char *n, int def)
 int main(int argc, char **argv)
 {
     game_cfg_t cfg;
-    long ticks, seed, every = 0, t;
+    long ticks, seed, every = 0, t, saveAt;
     const char *dir = ".";
     int frame = 0, i, verbose;
     clock_t c0;
@@ -198,6 +297,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: cfhost map diff nations tribes ticks seed [frameEvery] [dir]\n");
         return 2;
     }
+    sim_tables();
     mapid = argv[1];
     memset(&cfg, 0, sizeof cfg);
     cfg.difficulty = (uint8_t)atoi(argv[2]);
@@ -211,6 +311,7 @@ int main(int argc, char **argv)
     if (argc > 7) every = atol(argv[7]);
     if (argc > 8) dir = argv[8];
     verbose = getenv("CF_QUIET") == 0;
+    saveAt = envi("CF_SAVE", -1);
 
     if (!map_load_info(0, cfg.size)) {
         fprintf(stderr, "cannot load map %s\n", mapid);
@@ -218,7 +319,7 @@ int main(int argc, char **argv)
     }
     game_new(&cfg, (uint32_t)seed);
     game_place_ai();
-    g_pl[HUMAN].type = PT_NATION;
+    if (!getenv("CF_HUMAN")) g_pl[HUMAN].type = PT_NATION; /* CF_HUMAN: as the calculator bench */
     for (i = 0; i < 500; i++) {
         tile_t s = random_land();
         if (s != NO_TILE && game_spawn(HUMAN, s)) break;
@@ -229,7 +330,8 @@ int main(int argc, char **argv)
     c0 = clock();
     for (t = 0; t < ticks; t++) {
         game_tick();
-        if ((t & 127) == 0) check();
+        if (t == saveAt) save_roundtrip();
+        if ((t & 127) == 0 || t == saveAt) check();
         if (every && t % every == 0) dump(dir, frame++);
         if (verbose && t % 1200 == 0) {
             int alive = 0, at = 0, un[U_TYPES] = {0}, top = 0;
@@ -249,11 +351,15 @@ int main(int argc, char **argv)
     }
     check();
     if (every) dump(dir, frame++);
+    if (getenv("CF_HUMAN")) printf("checksum at tick %u: %04X\n", (unsigned)g_tick, sim_checksum());
     printf("%s size=%d seed=%ld end t=%lds winner=%s (%.2fs cpu) events:", mapid,
            cfg.size, seed, t / 10, g_winner ? g_pl[g_winner].name : "-",
            (double)(clock() - c0) / CLOCKS_PER_SEC);
     for (i = 1; i < 25; i++) printf(" %lu", nevents[i]);
-    printf("\n");
+    printf("\n  routes %lu (failed %lu), tiles searched %lu (max %lu in one), guided %lu (%lu cell states),"
+           " overflows %lu, boats %lu (no sea route %lu)\n",
+           g_pathCalls, g_pathFails, g_pathPops, g_pathMax, g_pathBfs, g_pathStates, g_pathOverflow, g_boatTry,
+           g_boatFail);
     if (verbose) {
         int un[U_TYPES] = {0};
         for (i = 0; i < MAX_UNITS; i++) un[g_un[i].type]++;

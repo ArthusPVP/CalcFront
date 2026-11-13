@@ -30,7 +30,7 @@ static void make_allies(uint8_t a, uint8_t b)
 void ally_request(uint8_t from, uint8_t to)
 {
     if (from == to || !g_pl[from].alive || !g_pl[to].alive || ALLIED(from, to)) return;
-    if (g_pl[from].reqFrom & BIT(to)) {
+    if (MASKBIT(g_pl[from].reqFrom, to)) {
         /* they already asked us: that is a yes */
         make_allies(from, to);
         if (from == HUMAN || to == HUMAN) ui_event(EV_ALLY_OK, from == HUMAN ? to : from, 0);
@@ -43,7 +43,7 @@ void ally_request(uint8_t from, uint8_t to)
 void ally_answer(uint8_t from, uint8_t to, bool yes)
 {
     /* `to` answers the request made by `from` */
-    if (!(g_pl[to].reqFrom & BIT(from))) return;
+    if (!MASKBIT(g_pl[to].reqFrom, from)) return;
     g_pl[to].reqFrom &= ~BIT(from);
     if (yes && g_pl[from].alive && g_pl[to].alive)
         make_allies(from, to);
@@ -74,7 +74,7 @@ void diplo_tick(void)
         player_t *pa = &g_pl[a];
         if (!pa->alive || !pa->allies) continue;
         for (b = (uint8_t)(a + 1); b <= g_nplayers; b++) {
-            if (!(pa->allies & BIT(b))) continue;
+            if (!MASKBIT(pa->allies, b)) continue;
             if ((int16_t)(now - pa->allyUntil[b]) >= 0) {
                 pa->allies &= ~BIT(b);
                 g_pl[b].allies &= ~BIT(a);

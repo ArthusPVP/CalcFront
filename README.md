@@ -49,6 +49,9 @@ alliances (and break them), and launch nukes, against up to 30 computer players.
   - **missile silos**, **SAM launchers**, **atom bombs**, **hydrogen bombs** and **MIRVs**;
   - **alliances** (5 minutes), alliance requests, betrayal, targets, embargoes;
   - win by owning 80% of the land.
+- **Save and resume**: save from the pause menu, continue from the title screen.
+- **A clean screen** with only what you need, more in *More > Info*, and a hidden
+  **pro mode** that shows every number (see [Pro mode](#pro-mode)).
 - **Optimised for the eZ80**: runs at OpenFront's full 10 ticks per second in
   CEmu, even on Large maps with 30 players and 80+ units on screen (see
   [Performance](#performance)).
@@ -74,9 +77,10 @@ alliances (and break them), and launch nukes, against up to 30 computer players.
      [arTIfiCE](https://yvantt.github.io/arTIfiCE/) brings them back; check its
      page for the OS versions it supports.
 
-The game needs about **120 KB of free RAM** while it runs (98 KB of program code
-plus 20 KB of work memory, which it creates as a temporary `CFTMP` variable and
-deletes on exit). Archive other programs if you get *Not enough free RAM*.
+The game needs about **135 KB of free RAM** while it runs (113 KB of program
+code plus 20 KB of work memory, which it creates as a temporary `CFTMP`
+variable and deletes on exit). Archive other programs and variables if you get
+*Not enough free RAM* or *ERR:MEMORY*.
 
 ## How to play
 
@@ -93,7 +97,7 @@ around half of it.
 | `8` `4` `6` `2` | Scroll the map |
 | `+` / `−` | Zoom in / out (1, 2, 4 or 8 pixels per tile) |
 | `enter` | Attack the land under the cursor (or send the selected warship there) |
-| `clear` | Back / pause menu |
+| `clear` | Back / pause menu (Resume, Help, **Save**, Quit) |
 | `y=` `window` `zoom` `trace` `graph` | The five action keys, labelled on the bottom bar |
 
 ### Action keys
@@ -104,19 +108,44 @@ around half of it.
 | Build (on land) | City | Port | Factory | Defense post | More: Silo, SAM |
 | Build (on water) | Warship | | | | Back |
 | Nuke | Atom bomb | Hydrogen bomb | MIRV | | Back |
-| More | Diplomacy | Attack ratio −10% | Attack ratio +10% | Leaderboard | Game speed |
+| More | Diplomacy | Attack ratio −10% | Attack ratio +10% | Info (your stats, leaderboard) | Game speed |
 | Diplomacy | Ally / Betray | Target | Embargo / Trade | Retreat | Back |
 | Warship selected | Go here (patrol) | | | | Done |
 | Alliance request | Accept | Refuse | | | |
+| Pause | Resume | Help | Save | | Quit |
 
-Building on one of your existing buildings of the same type upgrades it.
+A greyed-out key means you cannot pay for it yet. Building on one of your
+existing buildings of the same type upgrades it.
 
-### The troop bar
+### Ships
 
-`[+399/s ⚔1.2K] [████ 4.53K / 12.1K ████] [$5.50K 12.3% land]`: troop growth
-per second and troops out attacking (left), troops at home in blue and troops
-out in orange against your cap (middle), gold and share of the land (right).
-Like OpenFront, troop numbers are shown divided by 10.
+Transport boats are drawn as an **x**, trade ships as a **dot** and warships
+as a **+**, in their owner's colour. Zoomed all the way out, trade ships and
+trains are not drawn, so the map stays readable.
+
+### Saving
+
+Pause with `clear` and press `zoom` (**Save**). The game is stored in the
+AppVars `CFSAVE0`, `CFSAVE1`... (usually 2 of them, under 16 KB in all), moved
+to the archive as they are written. Pick **Continue** on the title screen to
+resume. There is one save slot; saving again replaces it.
+
+### The status bar
+
+`[████ 4.53K / 12.1K ████]  $5.50K  12.3%`: your troops (blue: at home,
+orange: out attacking) against your cap, your gold and your share of the land
+(land tiles only, never water). Like OpenFront, troop numbers are shown
+divided by 10. *More > Info* shows the rest: growth per second, troops out,
+rank, buildings, warships, alliances with the time they have left, who attacks
+you, embargoes and the game time.
+
+### Pro mode
+
+On the **New game** screen, enter the Konami code: `↑ ↑ ↓ ↓ ← → ← →`, then
+`apps` (B) and `math` (A). Pro mode shows every number: growth per second and
+troops out next to the troop bar, land share to 0.01%, prices and troop counts
+under the action keys, terrain, levels, health and veterancy under the cursor,
+and the game clock. The same code turns it off; the choice is remembered.
 
 ### Prices (OpenFront's)
 
@@ -199,6 +228,9 @@ updates the *Latest build* pre-release. Pushing a `v*` tag publishes a release.
   Arguments: map, difficulty (0–3), nations, tribes, ticks, seed, and optionally
   a frame interval and a folder to dump PPM images. `CF_SIZE=1` picks the Large
   map, `CF_GOLD` and `CF_TROOPS` the multipliers (index 0–5, 1 = ×1).
+  `CF_SAVE=n` saves the game at tick `n`, loads it back, checks that nothing
+  changed and plays on. The summary line also reports the sea routes searched
+  (and the most tiles one search looked at) and the boats that found no route.
 - **Emulator** ([`tools/cemu_run.py`](tools/cemu_run.py)): drives a headless
   [CEmu](https://github.com/CE-Programming/CEmu) (with the small `launch` command
   from [`tools/cemu-headless-launch.patch`](tools/cemu-headless-launch.patch)),
@@ -216,19 +248,26 @@ values are slow library loops. To reach OpenFront's 10 ticks per second:
 
 - the map lives in the unused half of video memory, one byte per tile;
 - tile coordinates, bitmaps, log2/exp2 use byte tables and byte moves, no shift loops;
-- ship routes use a goal-directed search with a shared route cache;
+- ship routes are guided by a coarse map of 8×8-tile cells: a quick search
+  over the cells counts how far each one is from the goal, and the tile search
+  follows that count around continents instead of filling every bay (at most
+  about 1,100 tiles looked at for any route, against up to 25,000 before);
+  routes are shared through a cache;
 - per-tile attack costs are computed once per tick per terrain type;
 - unit loops only cover slots in use, and per-player unit counts are cached;
 - the screen is redrawn incrementally: only tiles that changed, sprites that
   moved, and sprites or buildings that a 16×16 dirty-cell grid says were painted
-  over.
+  over; scrolling slides the picture already in video memory and paints only
+  the strip that comes into view;
+- the status bar, info line and action keys are only redrawn when what they
+  show changes; the land share uses a cached reciprocal instead of a division.
 
 ## Project layout
 
 ```
 src/main.c        game flow, input, menus
 src/ce/           calculator front end: renderer, HUD
-src/sim/          portable game core (no calculator headers)
+src/sim/          portable game core (no calculator headers), save format
 host/             PC test harness for the game core
 tools/            map converter, map fetcher, emulator driver
 maps/calc/        map AppVars for the calculator

@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stddef.h>
 
 #ifdef HOST
 typedef uint32_t uint24_t;
@@ -53,7 +54,12 @@ typedef union {
     uint8_t b[2];
 } u16b_t;
 
-#include "tile_tab.h"
+/* byte tables for shift-free bitmap access: bit t of a bitmap is bit
+ * g_bitMask[lo] of byte g_bitHi[hi] + g_bitLo[lo] (hi, lo: bytes of t).
+ * Filled by sim_tables() at startup (static RAM costs no program RAM). */
+extern uint16_t g_bitHi[256];
+extern uint8_t g_bitLo[256], g_bitMask[256];
+void sim_tables(void);
 
 #define FORCE_INLINE static inline __attribute__((always_inline))
 
@@ -121,36 +127,42 @@ extern map_nation_t g_nat[MAX_MAP_NATIONS];
 enum { PT_NONE, PT_HUMAN, PT_NATION, PT_TRIBE };
 enum { DIFF_EASY, DIFF_MEDIUM, DIFF_HARD, DIFF_IMPOSSIBLE };
 
-typedef struct {
-    uint8_t type;
-    uint8_t alive;
-    uint8_t ratio;      /* attack ratio in % */
-    uint32_t troops;
-    uint32_t maxTroops;
-    uint32_t gold;
-    uint32_t growth;    /* troops gained last tick */
-    uint16_t tiles;
-    uint16_t minx, maxx, miny, maxy;
-    uint32_t allies;    /* bitmask of player ids */
-    uint32_t embargo;
-    uint32_t nbrs;      /* players we share a land border with (cached) */
-    uint32_t reqFrom;   /* pending alliance requests received */
-    uint8_t nbrTN;      /* borders unowned land */
-    uint8_t big8;       /* large-territory sigmoid, 0..255 */
-    uint16_t traitor;   /* ticks left of traitor status */
-    uint16_t cityLv;    /* sum of finished city levels */
-    uint8_t boats;
-    uint8_t nPost;      /* finished defense posts (refreshed every tick) */
-    uint8_t target;     /* player marked as target */
-    /* AI */
-    uint8_t aiWait;
-    uint8_t aiEnemy;
-    uint8_t aiFlags;
-    uint8_t aiTurn;
-    int8_t rel[MAXP];
-    uint16_t allyUntil[MAXP]; /* tick/16 when alliance with i expires */
-    char name[NATION_NAME_LEN];
+/* Padded to 256 bytes (and units to 32): indexing g_pl[p] is then a shift
+ * instead of a call to the multiply routine. Saves store PLAYER_BYTES. */
+typedef union {
+    struct {
+        uint8_t type;
+        uint8_t alive;
+        uint8_t ratio;      /* attack ratio in % */
+        uint32_t troops;
+        uint32_t maxTroops;
+        uint32_t gold;
+        uint32_t growth;    /* troops gained last tick */
+        uint16_t tiles;
+        uint16_t minx, maxx, miny, maxy;
+        uint32_t allies;    /* bitmask of player ids */
+        uint32_t embargo;
+        uint32_t nbrs;      /* players we share a land border with (cached) */
+        uint32_t reqFrom;   /* pending alliance requests received */
+        uint8_t nbrTN;      /* borders unowned land */
+        uint8_t big8;       /* large-territory sigmoid, 0..255 */
+        uint16_t traitor;   /* ticks left of traitor status */
+        uint16_t cityLv;    /* sum of finished city levels */
+        uint8_t boats;
+        uint8_t nPost;      /* finished defense posts (refreshed every tick) */
+        uint8_t target;     /* player marked as target */
+        /* AI */
+        uint8_t aiWait;
+        uint8_t aiEnemy;
+        uint8_t aiFlags;
+        uint8_t aiTurn;
+        int8_t rel[MAXP];
+        uint16_t allyUntil[MAXP]; /* tick/16 when alliance with i expires */
+        char name[NATION_NAME_LEN];
+    };
+    uint8_t size_[256];
 } player_t;
+#define PLAYER_BYTES (offsetof(player_t, name) + NATION_NAME_LEN)
 
 extern player_t g_pl[MAXP];
 extern uint8_t g_nplayers; /* highest id in use */
@@ -179,7 +191,10 @@ extern uint8_t g_mirvs;
 
 extern const uint32_t g_bits[32];
 #define BIT(p) (g_bits[p])
-#define ALLIED(a, b) ((g_pl[a].allies >> (b)) & 1)
+/* bit b of a 32-bit player mask, read as one byte: a variable 32-bit shift
+ * is a slow library loop on the eZ80 */
+#define MASKBIT(m, b) ((((const uint8_t *)&(m))[g_bitLo[(uint8_t)(b)]] & g_bitMask[(uint8_t)(b)]) != 0)
+#define ALLIED(a, b) MASKBIT(g_pl[a].allies, b)
 
 uint32_t gold_mul(uint32_t g);
 bool can_trade(uint8_t a, uint8_t b);
@@ -234,24 +249,28 @@ enum {
  *  nukes:   src = launch, dst = target, timer = flight, timer2 = flight time, aux = victim
  *  train:   src = segment start, tgt = next station, dst = final station,
  *           timer2 = step on segment, aux = segment length, dist = stops                   */
-typedef struct {
-    uint8_t type;
-    uint8_t owner;
-    tile_t pos;
-    tile_t dst;
-    tile_t src;
-    tile_t tgt;
-    uint16_t timer;
-    uint16_t timer2;
-    uint16_t dist;
-    uint8_t level;
-    uint8_t hp;
-    uint8_t path;
-    uint8_t aux;
-    uint8_t aux2;
-    uint8_t orig;
-    uint32_t troops;
+typedef union {
+    struct {
+        uint8_t type;
+        uint8_t owner;
+        tile_t pos;
+        tile_t dst;
+        tile_t src;
+        tile_t tgt;
+        uint16_t timer;
+        uint16_t timer2;
+        uint16_t dist;
+        uint8_t level;
+        uint8_t hp;
+        uint8_t path;
+        uint8_t aux;
+        uint8_t aux2;
+        uint8_t orig;
+        uint32_t troops;
+    };
+    uint8_t size_[32];
 } unit_t;
+#define UNIT_BYTES (offsetof(unit_t, troops) + 4) /* stored in saves */
 
 extern unit_t g_un[MAX_UNITS];
 extern uint8_t g_unHi; /* every unit lives below this index */
@@ -283,6 +302,15 @@ enum {
     EV_SUNK,        /* you sank a ship of type a owned by b */
 };
 
+#if defined(HOST) || defined(CF_PERF)
+/* statistics for the PC harness and the benchmark: route searches */
+#define PATH_STATS
+extern unsigned long g_pathPops, g_pathCalls, g_pathFails, g_pathMax, g_pathBfs, g_pathStates, g_pathOverflow;
+#endif
+#ifdef HOST
+extern unsigned long g_boatTry, g_boatFail;
+#endif
+
 /* ----------------------------------------------------------- profiling --- */
 #ifdef CF_PERF
 #include <time.h>
@@ -290,7 +318,16 @@ extern clock_t g_perf[12];
 #define PERF_START() clock_t perf_t0 = clock()
 #define PERF_ADD(i) (g_perf[i] += clock() - perf_t0, perf_t0 = clock())
 #define PERF_SKIP() (perf_t0 = clock())
+/* finer timers for the benchmark: PROF(i, statement) */
+extern clock_t g_prof[16];
+#define PROF(i, stmt)                                                                 \
+    do {                                                                              \
+        clock_t prof_t0_ = clock();                                                   \
+        stmt;                                                                         \
+        g_prof[i] += clock() - prof_t0_;                                              \
+    } while (0)
 #else
+#define PROF(i, stmt) stmt
 #define PERF_SKIP()
 #define PERF_START()
 #define PERF_ADD(i)
@@ -303,6 +340,8 @@ uint32_t fx_pow(uint32_t x, uint8_t p8); /* x^(p8/256) */
 uint16_t rnd(void);
 uint16_t rnd_n(uint16_t n); /* 0..n-1 */
 void rnd_seed(uint32_t s);
+void rnd_get(uint8_t *s); /* 4 bytes of generator state */
+void rnd_set(const uint8_t *s);
 uint16_t isqrt32(uint32_t v);
 uint16_t tdist(tile_t a, tile_t b);   /* euclidean distance in tiles */
 uint16_t mdist(tile_t a, tile_t b);   /* manhattan distance in tiles */
@@ -331,6 +370,9 @@ void st_set(tile_t t, bool on);
 tile_t random_land(void);
 tile_t random_water_near(tile_t c, uint8_t r, uint8_t comp);
 tile_t nearest_own_shore(uint8_t p, tile_t to, uint8_t comp);
+uint8_t coast_bodies(uint8_t p);  /* bit c set: p has land next to water body c */
+void coast_rebuild(void);
+void path_prepare(void);          /* build the coarse route guide (after loading tiles) */
 uint8_t path_find(tile_t from, tile_t to);   /* shared, cached; 0xFF on failure */
 void path_release(uint8_t slot);
 void path_reset(void);
@@ -349,7 +391,9 @@ uint8_t add_player(uint8_t type, const char *name);
 void kill_player(uint8_t p, uint8_t killer);
 void add_troops(uint8_t p, uint32_t n);
 void sub_troops(uint8_t p, uint32_t n);
-uint16_t land_pct10(uint8_t p); /* share of the map in 0.1% */
+uint16_t land_pct10(uint8_t p);  /* share of the land in 0.1% */
+uint16_t land_pct100(uint8_t p); /* share of the land in 0.01% */
+uint16_t sim_checksum(void);
 
 /* attack.c */
 bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwner);
@@ -370,6 +414,7 @@ bool can_build(uint8_t p, uint8_t type, tile_t t);
 bool build(uint8_t p, uint8_t type, tile_t t); /* structure, upgrade, warship */
 bool launch_nuke(uint8_t p, uint8_t type, tile_t target);
 void units_tick(void);
+void units_refresh(void);
 void unit_on_conquer(tile_t t, uint8_t newOwner);
 int16_t unit_at(tile_t t);
 bool post_near(uint8_t owner, tile_t t);
@@ -399,6 +444,8 @@ void train_tick(unit_t *u);
 void factory_tick(uint8_t i);
 bool is_station(const unit_t *u);
 void rail_reset(void);
+void rail_rebuild(void);
+bool rail_any(void); /* any railway on the map */
 
 /* diplo.c */
 void ally_request(uint8_t from, uint8_t to);
@@ -406,6 +453,12 @@ void ally_answer(uint8_t from, uint8_t to, bool yes);
 void ally_break(uint8_t a, uint8_t b);
 void diplo_tick(void);
 void rel_add(uint8_t p, uint8_t other, int8_t d);
+
+/* save.c: the front end supplies the byte stream (an AppVar on the calculator) */
+bool plat_save_write(const void *p, uint16_t n);
+bool plat_save_read(void *p, uint16_t n);
+bool game_save(void);              /* everything after the front end's own header */
+bool game_load(uint8_t mapIdx);    /* map file index of the saved map */
 
 /* ai.c */
 void ai_tick(void);

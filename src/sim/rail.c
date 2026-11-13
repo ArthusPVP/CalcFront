@@ -184,6 +184,10 @@ static uint8_t next_hop(uint8_t from, uint8_t to)
     return cur;
 }
 
+void rail_rebuild(void) { rebuild(); }
+
+bool rail_any(void) { return nEdges[cur] != 0; }
+
 void rail_tick(void)
 {
     if (dirty && (g_tick & 7) == 3) rebuild();
