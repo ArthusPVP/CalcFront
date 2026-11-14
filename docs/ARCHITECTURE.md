@@ -32,7 +32,7 @@ player) and `plat_map_*` (load map files).
 | Everything else (players, attacks, units, caches, coarse route guide) | static RAM (BSS) | ~47 KB |
 | Saved game | AppVars `CFSAVE0`, `CFSAVE1`... (8 KB each, archived when possible) | ~10 KB |
 | Pro mode setting | AppVar `CFSET` | 1 B |
-| Program code | user RAM, decompressed at launch | ~113 KB |
+| Program code | user RAM, decompressed at launch | ~108 KB |
 
 **Tile byte:** bits 5–6 terrain (0 water, 1 plains, 2 highland, 3 mountain).
 Land: bits 0–4 owner (0 = nobody), bit 7 fallout. Water: bits 0–2 water body
@@ -66,7 +66,7 @@ needed → AI → diplomacy every 16 ticks → win check every 32 ticks.
 | File | Role |
 |---|---|
 | `main.c` | Key scanning with real-time auto-repeat, the title, help, setup (with the Konami code for pro mode), info (your nation, leaderboard) and pause screens, the five action keys and their menus, player actions (attack, boat, build, nuke, diplomacy, warship orders), event messages, map discovery (`ti_Detect` on the `CFM2` signature), the scratch AppVar, saved games split over 8 KB AppVars, and the game loop: run the ticks that are due, then draw. |
-| `ce/render.c` | Draws the map straight into video memory. When the camera moves by less than a screen, the picture already drawn slides by a block copy and only the strips that came into view are painted; a full redraw happens on zoom changes and big jumps. Otherwise each frame repaints only tiles that changed, the area under sprites that moved, and sprites or buildings that a 16×16 dirty-cell grid says were painted over. Sprites are pre-built masks (ships: x for boats, dot for trade, + for warships); trade ships and trains are skipped at zoom 1. Also the cursor, nuke rings, explosion rings and the setup preview. |
+| `ce/render.c` | Draws the map straight into video memory. When the camera moves by less than a screen, the picture already drawn slides by a block copy and only the strips that came into view are painted; a full redraw happens on zoom changes and big jumps. Otherwise each frame repaints only tiles that changed, the area under sprites that moved, and sprites or buildings that a 16×16 dirty-cell grid says were painted over. Sprites are pre-built masks (ships: x for boats, dot for trade, + for warships); at zoom 1 trade ships are 2x2 dots and trains are skipped. Also the cursor, nuke rings, explosion rings and the setup preview. |
 | `ce/hud.c` | Number formatting (troops shown /10 like OpenFront, percentages, times), the screen layout for normal and pro mode, the status bar, the info line and the action-key bar. Each part remembers what it shows and is redrawn only when that changes. |
 | `ce/ui.h` | Palette indices, screen layout, renderer and HUD declarations. |
 
@@ -107,7 +107,7 @@ name), then the tile data, ZX0-compressed on the calculator.
 
 ## Profiling
 
-Build with `make CFLAGS="-Wall -Wextra -Oz -fno-inline-functions -DCF_PERF"`.
+Build with `make CFLAGS="-Wall -Wextra -Oz -fno-inline-functions -fno-jump-tables -DCF_PERF"`.
 Every 100 ticks the bottom of the screen shows the time spent in each part:
 economy, attacks, units, AI, buildings, moving sprites, erasing, tiles, cursor,
 full redraws and HUD.

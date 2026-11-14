@@ -130,6 +130,7 @@ bool game_load(uint8_t mapIdx)
     if (!c.nplayers || c.nplayers >= MAXP || c.unHi > MAX_UNITS || c.nAtk > MAX_ATTACKS) return false;
     if (!map_load_tiles(mapIdx, c.cfg.size)) return false;
     if (g_W != c.w || g_H != c.h || g_mi.land != c.land) return false; /* not the same map */
+    g_mapClean = false;
 
     g_cfg = c.cfg;
     g_cfg.map = mapIdx;
@@ -187,8 +188,9 @@ bool game_load(uint8_t mapIdx)
         return false;
 
     path_reset();
-    path_prepare();
-    coast_rebuild();
+    path_prepare_begin();
+    path_ready();
+    coast_rebuild(true);
     rail_reset();
     rail_rebuild();
     units_refresh();

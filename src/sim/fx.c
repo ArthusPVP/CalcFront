@@ -120,6 +120,11 @@ uint32_t fx_pow(uint32_t x, uint8_t p8)
     return fx_exp2((int16_t)(((uint24_t)fx_log2(x) * p8) >> 8));
 }
 
+/* (x * k) >> 8 and >> 4 in 32 bits: one call instead of a multiply and a
+ * shift call at every use */
+uint32_t mulq8(uint32_t x, uint16_t k) { return (x * k) >> 8; }
+uint32_t mulq4(uint32_t x, uint16_t k) { return (x * k) >> 4; }
+
 uint16_t isqrt32(uint32_t v)
 {
     uint32_t r = 0, b = 1UL << 30;
@@ -138,7 +143,7 @@ uint16_t isqrt32(uint32_t v)
 /* dx, dy between two tiles: one row lookup per tile (tx() alone does one) */
 FORCE_INLINE void delta(tile_t a, tile_t b, int *dx, int *dy)
 {
-    int ya = ty(a), yb = ty(b);
+    int ya = ty_in(a), yb = ty_in(b);
     *dx = (int)(a - g_rowStart[ya]) - (int)(b - g_rowStart[yb]);
     *dy = ya - yb;
 }

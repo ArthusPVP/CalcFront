@@ -77,7 +77,7 @@ alliances (and break them), and launch nukes, against up to 30 computer players.
      [arTIfiCE](https://yvantt.github.io/arTIfiCE/) brings them back; check its
      page for the OS versions it supports.
 
-The game needs about **135 KB of free RAM** while it runs (113 KB of program
+The game needs about **130 KB of free RAM** while it runs (108 KB of program
 code plus 20 KB of work memory, which it creates as a temporary `CFTMP`
 variable and deletes on exit). Archive other programs and variables if you get
 *Not enough free RAM* or *ERR:MEMORY*.
@@ -120,8 +120,8 @@ existing buildings of the same type upgrades it.
 ### Ships
 
 Transport boats are drawn as an **x**, trade ships as a **dot** and warships
-as a **+**, in their owner's colour. Zoomed all the way out, trade ships and
-trains are not drawn, so the map stays readable.
+as a **+**, in their owner's colour. Zoomed all the way out, trade ships
+shrink to small dots and trains are not drawn, so the map stays readable.
 
 ### Saving
 
@@ -236,7 +236,7 @@ updates the *Latest build* pre-release. Pushing a `v*` tag publishes a release.
   from [`tools/cemu-headless-launch.patch`](tools/cemu-headless-launch.patch)),
   sends the game, maps and C libraries, plays a key script and saves screenshots.
   You need your own TI-84 Plus CE ROM dump (`CF_ROM=...`).
-- **Profiling**: `make CFLAGS="-Wall -Wextra -Oz -fno-inline-functions -DCF_PERF"` builds a benchmark (see [Architecture](docs/ARCHITECTURE.md#profiling)) that
+- **Profiling**: `make CFLAGS="-Wall -Wextra -Oz -fno-inline-functions -fno-jump-tables -DCF_PERF"` builds a benchmark (see [Architecture](docs/ARCHITECTURE.md#profiling)) that
   shows, every 100 game ticks, the time spent in each part of the game and of
   the drawing at the bottom of the screen.
 

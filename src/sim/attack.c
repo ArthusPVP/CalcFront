@@ -291,7 +291,7 @@ static void run_attack(attack_t *a)
         a8 = r8 < 210 ? 210 : (r8 > 1920 ? 1920 : r8);
         b8 = r8 / 20;
         b8 = b8 < 256 ? 256 : (b8 > 12800 ? 12800 : b8);
-        sc8 = ((uint32_t)a8 * b8) >> 8;
+        sc8 = mulq8(a8, b8);
     }
     memset(have, 0, sizeof have);
     cacheOk = def || a->troops >= 40000;
@@ -341,16 +341,16 @@ static void run_attack(attack_t *a)
                 tc2 *= 3;
             }
             if (dp->type == PT_TRIBE && ap->type != PT_TRIBE) mag = (mag * 179) >> 8;
-            tmp = ((uint32_t)mag * lossRatio) >> 8;
-            loss = (tmp * term) >> 8;
-            cost = (sc8 * tc2) >> 4;
-            cost = (cost * g_L16) >> 4;
-            cost = (cost * 60) >> 8;
-            cost = (cost * bAs) >> 8;
-            cost = (cost * bD) >> 8;
+            tmp = mulq8(mag, lossRatio);
+            loss = mulq8(tmp, term);
+            cost = mulq4(sc8, (uint16_t)tc2);
+            cost = mulq4(cost, g_L16);
+            cost = mulq8(cost, 60);
+            cost = mulq8(cost, bAs);
+            cost = mulq8(cost, bD);
             if (dp->traitor) {
                 loss >>= 1;
-                cost = (cost * 205) >> 8;
+                cost = mulq8(cost, 205);
             }
             if (cost < 16) cost = 16;
         }

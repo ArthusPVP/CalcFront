@@ -128,6 +128,7 @@ static void set_zoom_info(void)
  * Walks each pixel row tile span by tile span: one colour lookup per tile. */
 static void paint_rect(int x0, int y0, int x1, int y1)
 {
+    bool lastRail = false;
     int y, w, tc0, my;
     uint8_t *rowp, xoff0, yoff;
     if (x0 < 0) x0 = 0;
@@ -141,11 +142,39 @@ static void paint_rect(int x0, int y0, int x1, int y1)
     xoff0 = (uint8_t)(x0 & (zoom - 1));
     my = camy + (y0 >> zsh);
     yoff = (uint8_t)(y0 & (zoom - 1));
+    if (zoom == 1) {
+        /* one pixel per tile: a straight walk along each row */
+        int xin0 = tc0 < 0 ? -tc0 : 0, xin1 = (int)g_W - tc0;
+        if (xin0 > w) xin0 = w;
+        if (xin1 > w) xin1 = w;
+        if (xin1 < xin0) xin1 = xin0;
+        for (y = y0; y <= y1; y++, rowp += SCR_W, my++) {
+            const uint8_t *mp;
+            uint8_t *d = rowp + xin0;
+            int k;
+            if (my < 0 || my >= (int)g_H || xin0 >= xin1) {
+                memset(rowp, C_VOID, w);
+                continue;
+            }
+            if (xin0) memset(rowp, C_VOID, xin0);
+            if (xin1 < w) memset(rowp + xin1, C_VOID, w - xin1);
+            mp = g_map + g_rowStart[my] + tc0 + xin0;
+            for (k = xin0; k < xin1; k++, mp++) {
+                uint8_t c;
+                TILE_COLOR(mp, c);
+                if (railOn && bitget(g_railbits, (tile_t)(mp - g_map))) c = C_RAIL;
+                *d++ = c;
+            }
+        }
+        return;
+    }
     for (y = y0; y <= y1; y++, rowp += SCR_W) {
-        if (my < 0 || my >= (int)g_H)
+        bool railRow = zoom > 2 && (uint8_t)(yoff - railLo) < railN;
+        if (y > y0 && yoff && railRow == lastRail)
+            memcpy(rowp, rowp - SCR_W, w); /* same tile row, same rail band: as above */
+        else if (my < 0 || my >= (int)g_H)
             memset(rowp, C_VOID, w);
         else {
-            bool railRow = zoom > 2 && (uint8_t)(yoff - railLo) < railN;
             tile_t rowT = g_rowStart[my];
             const uint8_t *mp = g_map + rowT + tc0;
             uint8_t *d = rowp;
@@ -166,10 +195,12 @@ static void paint_rect(int x0, int y0, int x1, int y1)
                             rail = railRow;
                     }
                 }
-                if (span == 1)
-                    *d = c;
-                else {
-                    memset(d, c, span);
+                switch (span) { /* short runs: stores beat a memset call */
+                case 1: *d = c; break;
+                case 2: d[0] = d[1] = c; break;
+                default: memset(d, c, span);
+                }
+                if (span > 1) {
                     if (rail) {
                         /* rail mark: pixels railLo .. railLo+railN-1 of the tile */
                         uint8_t k;
@@ -185,6 +216,7 @@ static void paint_rect(int x0, int y0, int x1, int y1)
                 span = zoom;
             }
         }
+        lastRail = railRow;
         if (++yoff == zoom) {
             yoff = 0;
             my++;
@@ -316,7 +348,7 @@ static void blit(const uint8_t *m, uint8_t w, uint8_t h, int x0, int y0, const u
 /* screen centre of tile t */
 FORCE_INLINE void scr_xy(tile_t t, int *x, int *y)
 {
-    int ty_ = ty(t);
+    int ty_ = ty_in(t);
     *x = (((int)(t - g_rowStart[ty_]) - camx) << zsh) + (zoom >> 1);
     *y = ((ty_ - camy) << zsh) + (zoom >> 1);
 }
@@ -344,6 +376,11 @@ static void draw_struct(const unit_t *u, int cx, int cy)
 static void draw_ship(const unit_t *u, int cx, int cy)
 {
     uint8_t cols[3];
+    if (zoom == 1 && u->type == U_TRADE) {
+        /* zoomed all the way out: a 2x2 dot in the owner's colour */
+        fill(cx - 1, cy - 1, 2, 2, C_FILL + u->owner);
+        return;
+    }
     cols[0] = 0xFF; /* transparent */
     cols[1] = C_BLACK;
     cols[2] = C_FILL + u->owner;
@@ -567,8 +604,8 @@ static void overlays(bool all)
             continue;
         }
         if (IS_STRUCT(t)) continue;
-        if (zoom == 1 && (t == U_TRADE || t == U_TRAIN)) {
-            /* zoomed all the way out: too small to matter, too many to draw */
+        if (zoom == 1 && t == U_TRAIN) {
+            /* zoomed all the way out: the railway shows where trains go */
             drawnType[i] = 0;
             continue;
         }
@@ -903,7 +940,7 @@ void r_frame(void)
     sqn = 0;
     for (n = dqn; n; n--) {
         tile_t t = dq[dqh];
-        uint16_t y = ty(t);
+        uint16_t y = ty_in(t);
         int x = (int)(t - g_rowStart[y]), sx = (x - camx) << zsh, sy = ((int)y - camy) << zsh;
         dqh = (dqh + 1) & (DQ - 1);
         if (sx < -zoom || sx > SCR_W || sy < -zoom || sy > vh) continue;

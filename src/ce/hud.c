@@ -131,6 +131,7 @@ char *s_fmt(char *dst, const char *f, ...)
             continue;
         }
         switch (*++f) {
+        case '%': *dst++ = '%'; break;
         case 's': dst = s_cat(dst, va_arg(ap, const char *)); break;
         case 'n': dst = s_num(dst, va_arg(ap, uint32_t)); break;
         case 't': dst = s_troops(dst, va_arg(ap, uint32_t)); break;
@@ -222,14 +223,18 @@ void hud_logo(int y)
             const uint8_t *g = word[l] == 6 ? logoN : word[l] == 7 ? logoT : logoFont[(uint8_t)word[l]];
             for (r = 0; r < 9; r++)
                 for (c = 0; c < 7; c++) {
-                    int x = x0 + (l * 8 + c) * s, yy = y + r * s;
-                    if (!(g[r] & (0x40 >> c))) continue;
+                    /* one rectangle per run of lit pixels in the row */
+                    int x = x0 + (l * 8 + c) * s, yy = y + r * s, n = 0;
+                    while (c + n < 7 && (g[r] & (0x40 >> (c + n)))) n++;
+                    if (!n) continue;
+                    c = (uint8_t)(c + n - 1);
+                    n *= s;
                     if (pass == 0)
-                        box(x + 3, yy + 4, s, s, C_SHADOW);
+                        box(x + 3, yy + 4, n, s, C_SHADOW);
                     else if (pass == 1)
-                        box(x - 2, yy - 2, s + 4, s + 4, C_LOGO0);
+                        box(x - 2, yy - 2, n + 4, s + 4, C_LOGO0);
                     else
-                        box(x, yy, s, s, r < 3 ? C_LOGO1 : r < 6 ? C_LOGO2 : C_LOGO3);
+                        box(x, yy, n, s, r < 3 ? C_LOGO1 : r < 6 ? C_LOGO2 : C_LOGO3);
                 }
         }
 }

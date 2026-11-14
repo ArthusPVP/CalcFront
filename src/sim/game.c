@@ -162,8 +162,8 @@ void game_new(const game_cfg_t *cfg, uint32_t seed)
     g_winner = 0;
     g_mirvs = 0;
     g_landLeft = g_mi.land;
-    path_prepare();
-    coast_rebuild();
+    path_prepare_begin(); /* built while the player picks a start (or on first use) */
+    coast_rebuild(false);
     s = g_mi.scale16 >> 4;
     if (s < 12) s = 12;
     if (s > 40) s = 40;

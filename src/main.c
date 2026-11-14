@@ -190,8 +190,17 @@ static clock_t reqUntil;
 
 enum { M_MAIN, M_BUILD, M_BUILD2, M_NUKE, M_MORE, M_DIPLO, M_SHIP, M_REQ, M_SPAWN, M_PAUSE, M_END };
 static uint8_t menu, menuBack;
+#ifndef CF_PERF
+#define PROF_BOOT(i, stmt) stmt
+#endif
 #ifdef CF_PERF
-clock_t g_perf[12], g_prof[16];
+#define PROF_BOOT(i, stmt)                                                            \
+    do {                                                                              \
+        clock_t b0_ = clock();                                                        \
+        stmt;                                                                         \
+        g_boot[i] = clock() - b0_;                                                    \
+    } while (0)
+clock_t g_perf[12], g_prof[16], g_boot[6];
 extern uint8_t g_perfNb, g_perfNm;
 static clock_t perfShow[12], perfTotal;
 static uint16_t perfFrames;
@@ -427,7 +436,7 @@ static void cursor_info(void)
     if (proMode) s_time(clock_, g_tick / 10);
     {
         /* one pass over the units: warships first, then boats, then trade
-         * ships (not drawn at zoom 1), the closest within reach */
+         * ships, the closest within reach */
         static const uint8_t rank[3] = {1, 2, 0}; /* boat, trade ship, warship */
         uint8_t r = zoom >= 4 ? 0 : 1, br = 3;
         uint16_t bd = 0xFFFF;
@@ -435,7 +444,7 @@ static void cursor_info(void)
             const unit_t *u = &g_un[k];
             uint8_t rk;
             uint16_t d;
-            if (!IS_SHIP(u->type) || (u->type == U_TRADE && zoom == 1)) continue;
+            if (!IS_SHIP(u->type)) continue;
             rk = rank[u->type - U_BOAT];
             if (rk > br) continue;
             d = mdist(u->pos, t);
@@ -447,68 +456,44 @@ static void cursor_info(void)
     }
     if (s >= 0) {
         const unit_t *u = &g_un[s];
-        p = s_cat(p, unitNames[u->type]);
-        p = s_cat(p, " - ");
-        p = s_cat(p, g_pl[u->owner].name);
-        if (u->type == U_BOAT) {
-            p = s_cat(p, " ");
-            s_troops(p, u->troops);
-        } else if (u->type == U_TRADE && u->owner != u->orig)
+        p = s_fmt(p, "%s - %s", unitNames[u->type], g_pl[u->owner].name);
+        if (u->type == U_BOAT)
+            s_fmt(p, " %t", u->troops);
+        else if (u->type == U_TRADE && u->owner != u->orig)
             s_cat(p, " (captured)");
         else if (u->type == U_WARSHIP && proMode) {
-            p = s_cat(p, " ");
-            p = s_num(p, (uint32_t)u->hp * 100 / WS_MAXHP(u));
-            p = s_cat(p, "%");
-            if (u->level) {
-                p = s_cat(p, " vet ");
-                s_num(p, u->level);
-            }
+            p = s_fmt(p, " %n%%", (uint32_t)u->hp * 100 / WS_MAXHP(u));
+            if (u->level) s_fmt(p, " vet %n", (uint32_t)u->level);
         }
-        hud_info(buf, u->owner == HUMAN ? C_GREEN : C_WHITE, proMode ? clock_ : 0);
-        return;
-    }
-    if (!IS_LAND(b)) {
+        col = u->owner == HUMAN ? C_GREEN : C_WHITE;
+    } else if (!IS_LAND(b)) {
         if (proMode) s_cat(p, (b & T_COMP) ? "Sea" : "Lake");
     } else {
-        uint8_t o = b & T_OWNER;
-        if (has_struct(t)) {
-            int16_t i = unit_at(t);
-            if (i >= 0) {
-                p = s_cat(p, unitNames[g_un[i].type]);
-                if (proMode) {
-                    if (g_un[i].level > 1) {
-                        p = s_cat(p, " L");
-                        p = s_num(p, g_un[i].level);
-                    }
-                    if (is_station(&g_un[i])) p = s_cat(p, " +rail");
-                }
-                if (!BUILT(&g_un[i])) p = s_cat(p, " (building)");
-                p = s_cat(p, " - ");
-            }
-        }
-        if (!o) {
-            p = s_cat(p, (b & T_FALL) ? "Fallout" : "Free land");
+        static const char *const tag[] = {"", " ally", " tribe", " at war"};
+        static const uint8_t tagCol[] = {C_WHITE, C_CYAN, C_WHITE, C_RED};
+        uint8_t o = b & T_OWNER, g = 0;
+        int16_t i = has_struct(t) ? unit_at(t) : -1;
+        if (i >= 0) {
+            const unit_t *u = &g_un[i];
+            p = s_cat(p, unitNames[u->type]);
             if (proMode) {
-                p = s_cat(p, ", ");
-                s_cat(p, terr[(b >> 5) & 3]);
+                if (u->level > 1) p = s_fmt(p, " L%n", (uint32_t)u->level);
+                if (is_station(u)) p = s_cat(p, " +rail");
             }
-        } else {
+            p = s_fmt(p, "%s - ", BUILT(u) ? "" : " (building)");
+        }
+        if (!o)
+            s_fmt(p, "%s%s%s", (b & T_FALL) ? "Fallout" : "Free land", proMode ? ", " : "",
+                  proMode ? terr[(b >> 5) & 3] : "");
+        else {
             const player_t *pl = &g_pl[o];
-            p = s_cat(p, pl->name);
-            p = s_cat(p, " ");
-            p = s_troops(p, pl->troops);
-            col = C_WHITE;
             if (o == HUMAN)
                 col = C_GREEN;
-            else if (ALLIED(HUMAN, o)) {
-                s_cat(p, " ally");
-                col = C_CYAN;
-            } else if (pl->type == PT_TRIBE)
-                s_cat(p, " tribe");
-            else if (attacking(o, HUMAN) || attacking(HUMAN, o)) {
-                s_cat(p, " at war");
-                col = C_RED;
+            else {
+                g = ALLIED(HUMAN, o) ? 1 : pl->type == PT_TRIBE ? 2 : (attacking(o, HUMAN) || attacking(HUMAN, o)) ? 3 : 0;
+                col = tagCol[g];
             }
+            s_fmt(p, "%s %t%s", pl->name, pl->troops, tag[g]);
         }
     }
     hud_info(buf, col, proMode ? clock_ : 0);
@@ -1036,6 +1021,7 @@ static void grow(tile_t t, uint8_t owner, uint8_t size)
     tile_t *q = g_mem->vlist;
     uint8_t h = 0, e = 0, i;
     if (!IS_LAND(g_map[t]) || OWNER_OF(t)) return;
+    g_mapClean = false;
     g_map[t] |= owner;
     q[e++] = t;
     while (h < e && e < size) {
@@ -1068,6 +1054,14 @@ static void title_backdrop(void)
     vy0 = 4;
     vh = 128;
     r_backdrop();
+    /* take the nations off again: the map is then as loaded, and the setup
+     * screen can use it without unpacking it a second time */
+    {
+        uint8_t *p = g_map, *end = g_map + (uint16_t)(g_W * g_H);
+        for (; p < end; p++)
+            if (IS_LAND(*p)) *p &= (uint8_t)~T_OWNER;
+        g_mapClean = true;
+    }
 }
 
 /* returns 0 to quit, 1 for a new game, 2 to continue the saved one */
@@ -1080,7 +1074,7 @@ static uint8_t title_screen(void)
     ui_layout();
     for (;;) {
         hud_panel();
-        if (nMaps) title_backdrop();
+        if (nMaps) PROF_BOOT(0, title_backdrop());
         hud_logo(12);
         hud_center("Conquer the world, one tile at a time", 140, C_WHITE);
         if (!nMaps) {
@@ -1188,7 +1182,7 @@ static bool setup_screen(void)
     uint8_t sel = 0, maxN;
     const char *note = 0;
     hud_panel();
-    setup_load_map();
+    PROF_BOOT(1, setup_load_map());
     for (;;) {
         setup_draw(sel, note);
         note = 0;
@@ -1458,11 +1452,14 @@ static bool play(bool resume)
 
     if (!resume) {
 #ifdef CF_PERF
-        game_new(&cfg, 0xC0FFEEUL);
+        PROF_BOOT(2, game_new(&cfg, 0xC0FFEEUL));
 #else
         game_new(&cfg, (uint32_t)clock() * 2654435761UL + rtc_Time());
 #endif
-        game_place_ai();
+        PROF_BOOT(4, game_place_ai());
+#ifdef CF_PERF
+        PROF_BOOT(3, path_ready());
+#endif
         zoom = 2;
         curx = g_W / 2;
         cury = g_H / 2;
@@ -1498,6 +1495,25 @@ static bool play(bool resume)
         spawned = spectate = true;
         speed = 4;
         resume = true;
+    }
+#endif
+#ifdef CF_PERF
+    PROF_BOOT(5, r_frame());
+    {
+        static const char lbl[6][4] = {"bd", "st", "nw", "pp", "ai", "dr"};
+        char t[48], *q = t;
+        uint8_t b;
+        for (b = 0; b < 6; b++) {
+            q = s_cat(q, lbl[b]);
+            q = s_num(q, (uint32_t)g_boot[b] * 1000 / CLOCKS_PER_SEC);
+            *q++ = ' ';
+        }
+        *q = 0;
+        gfx_SetColor(C_BLACK);
+        gfx_FillRectangle_NoClip(0, 100, SCR_W, 12);
+        hud_text(t, 4, 102, C_CYAN);
+        wait_key(); /* start-up timings (ms), until a key */
+        r_request_full();
     }
 #endif
     if (resume) {
@@ -1575,6 +1591,7 @@ static bool play(bool resume)
             if (menu == M_SPAWN) {
                 if (i == 0) {
                     if (game_spawn(HUMAN, TILE(curx, cury))) {
+                        path_ready(); /* the rest of the route guide, if any */
                         spawned = true;
                         last = clock();
                         set_menu(M_MAIN);
@@ -1716,6 +1733,8 @@ static bool play(bool resume)
             }
         }
 
+        /* while the player picks a start, build the route guide a row at a time */
+        if (menu == M_SPAWN) path_prepare_step();
         if (menu < M_PAUSE) r_frame();
 #ifdef CF_PERF
         clock_t hudT0 = clock();

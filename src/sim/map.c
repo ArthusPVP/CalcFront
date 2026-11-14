@@ -6,6 +6,9 @@ uint16_t g_rowStart[MAP_MAX_H + 1];
 uint16_t g_rowOfHi[256];
 int16_t g_dirofs[4];
 map_info_t g_mi;
+
+uint16_t ty(tile_t t) { return ty_in(t); }
+uint16_t tx(tile_t t) { return (uint16_t)(t - g_rowStart[ty_in(t)]); }
 uint16_t g_bitHi[256];
 uint8_t g_bitLo[256], g_bitMask[256];
 
@@ -97,15 +100,27 @@ bool map_load_info(uint8_t idx, uint8_t var)
     return true;
 }
 
+/* the tiles in g_map are exactly map file idx, variant var, as loaded: no
+ * owner, fallout or other change yet (cleared by anything that writes tiles) */
+bool g_mapClean;
+static uint8_t cleanIdx = 0xFF, cleanVar;
+static uint16_t cleanLand;
+static uint8_t mapIdx; /* map file of the tiles in g_map */
+
 bool map_load_tiles(uint8_t idx, uint8_t var)
 {
     uint16_t size;
     const uint8_t *d;
     if (!map_load_info(idx, var)) return false;
-    d = plat_map_open(idx, &size);
-    plat_map_tiles(d + g_mi.off, (uint16_t)(g_mi.w * g_mi.h), g_mi.comp);
     memset(g_stbits, 0, 8192);
     memset(g_railbits, 0, sizeof g_mem->railbits);
+    mapIdx = idx;
+    if (g_mapClean && cleanIdx == idx && cleanVar == g_mi.var) {
+        g_mi.land = cleanLand; /* already there: no need to unpack it again */
+        return true;
+    }
+    d = plat_map_open(idx, &size);
+    plat_map_tiles(d + g_mi.off, (uint16_t)(g_mi.w * g_mi.h), g_mi.comp);
     /* count the land from the tiles themselves: the share of the map shown to
      * the player and the win check must never include water */
     {
@@ -113,8 +128,11 @@ bool map_load_tiles(uint8_t idx, uint8_t var)
         uint16_t n = 0;
         for (; p < end; p++)
             if (IS_LAND(*p)) n++;
-        g_mi.land = n;
+        g_mi.land = cleanLand = n;
     }
+    g_mapClean = true;
+    cleanIdx = idx;
+    cleanVar = g_mi.var;
     return true;
 }
 
@@ -143,11 +161,12 @@ static void coast_move(tile_t t, uint8_t from, uint8_t to)
     }
 }
 
-/* recount every coast (new game or loaded game) */
-void coast_rebuild(void)
+/* recount every coast (loaded game; a new game owns nothing: just clear) */
+void coast_rebuild(bool scan)
 {
     uint16_t t, n = (uint16_t)(g_W * g_H);
     memset(coast, 0, sizeof coast);
+    if (!scan) return;
     for (t = 0; t < n; t++) {
         uint8_t b = g_map[t];
         if (IS_LAND(b) && (b & T_OWNER)) coast_move(t, 0, b & T_OWNER);
@@ -160,12 +179,13 @@ void conquer(tile_t t, uint8_t p)
     uint16_t x, y;
     player_t *pl = &g_pl[p];
     if (old == p || !IS_LAND(b)) return;
+    g_mapClean = false;
     if (old) g_pl[old].tiles--;
     if (b & T_FALL) g_landLeft++;
     coast_move(t, old, p);
     g_map[t] = (uint8_t)((b & T_TERR) | p);
     pl->tiles++;
-    y = ty(t);
+    y = ty_in(t);
     x = (uint16_t)(t - g_rowStart[y]);
     if (x < pl->minx) pl->minx = x;
     if (x > pl->maxx) pl->maxx = x;
@@ -193,6 +213,7 @@ void relinquish(tile_t t)
 {
     uint8_t b = g_map[t], old = b & T_OWNER;
     if (!IS_LAND(b)) return;
+    g_mapClean = false;
     if (!(b & T_FALL)) g_landLeft--;
     if (old) coast_move(t, old, 0);
     g_map[t] = (uint8_t)((b & T_TERR) | T_FALL);
@@ -427,24 +448,30 @@ static bool cOn;  /* the grid fits this map */
 static bool cUse; /* the running search is guided */
 
 static const uint8_t sideBit[4] = {1, 2, 4, 8};
-static const int8_t sideDx[4] = {1, -1, 0, 0}, sideDy[4] = {0, 0, 1, -1};
 
-/* Flood the water of a cell (top-left x0, y0, size w x h) from local tile s
- * (ly * 8 + lx), setting lab[] to id. Returns the sides where it crosses into
- * the next cell. The map frame is never navigable, so neighbours exist. */
-__attribute__((noinline)) static uint8_t cell_fill(uint16_t x0, uint16_t y0, uint8_t w, uint8_t h,
-                                                   uint8_t s, uint8_t *lab, uint8_t id)
+static uint8_t cell_size(uint16_t org, uint16_t lim) { return lim - org < CS ? (uint8_t)(lim - org) : CS; }
+
+static int cellRow[CS]; /* ly * W: offsets of a cell's rows from its top-left tile */
+
+/* Flood the water of a cell (top-left tile at base, size w x h) from local
+ * tile s (ly * 8 + lx), setting lab[] to id. Returns the sides where it
+ * crosses into the next cell. The map frame is never navigable, so the
+ * neighbours of a navigable tile always exist. */
+__attribute__((noinline)) static uint8_t cell_fill(const uint8_t *base, uint8_t w, uint8_t h, uint8_t s,
+                                                   uint8_t *lab, uint8_t id)
 {
+    static const int8_t sideDx[4] = {1, -1, 0, 0}, sideDy[4] = {0, 0, 1, -1};
     uint8_t stk[64], n = 0, sides = 0;
+    int W = (int)g_W;
     lab[s] = id;
     stk[n++] = s;
     while (n) {
         uint8_t i = stk[--n], lx = i & 7, ly = i >> 3, k;
-        tile_t t = TILE(x0 + lx, y0 + ly);
-        uint8_t comp = g_map[t] & T_COMP;
+        const uint8_t *t = base + cellRow[ly] + lx;
+        uint8_t comp = *t & T_COMP;
         for (k = 0; k < 4; k++) {
             int8_t nx = (int8_t)(lx + sideDx[k]), ny = (int8_t)(ly + sideDy[k]);
-            uint8_t nb = g_map[(tile_t)(t + g_dirofs[k])];
+            uint8_t nb = t[k == 0 ? 1 : k == 1 ? -1 : k == 2 ? W : -W];
             if ((nb & (T_TERR | T_COMP)) != comp) continue; /* land or another sea */
             if (nx < 0 || ny < 0 || nx >= (int8_t)w || ny >= (int8_t)h) {
                 sides |= sideBit[k];
@@ -461,40 +488,101 @@ __attribute__((noinline)) static uint8_t cell_fill(uint16_t x0, uint16_t y0, uin
     return sides;
 }
 
-static uint8_t cell_size(uint16_t org, uint16_t lim) { return lim - org < CS ? (uint8_t)(lim - org) : CS; }
-
-void path_prepare(void)
+/* water body crossing the right (right) or bottom border of a cell made of
+ * one sea c0 only, or 0 */
+static uint8_t open_cross(const uint8_t *base, uint8_t w, uint8_t h, uint8_t c0, bool right)
 {
-    uint8_t cx, cy;
-    uint16_t c = 0;
+    uint8_t k;
+    for (k = 0; k < (right ? h : w); k++)
+        if ((right ? base[cellRow[k] + w] : base[(int)g_W * h + k]) == c0) return c0;
+    return 0;
+}
+
+/* The guide only depends on the map's water, so it is kept for as long as
+ * the same map is played. It is built one row of cells per call to
+ * path_prepare_step(): the calculator does it while the player picks a
+ * start, and any route search finishes it first if needed. */
+static uint8_t prepRow, guideIdx = 0xFF, guideVar;
+static bool prepDone;
+
+void path_prepare_begin(void)
+{
+    prepDone = guideIdx == mapIdx && guideVar == g_mi.var;
+    if (prepDone) return;
+    guideIdx = 0xFF;
     cW = (uint8_t)((g_W + CS - 1) / CS);
     cH = (uint8_t)((g_H + CS - 1) / CS);
     cN = (uint16_t)cW * cH;
     cOn = cN <= CMAX;
     nSplit = 0;
-    if (!cOn) return;
-    for (cy = 0; cy < cH; cy++) {
+    prepRow = 0;
+    prepDone = !cOn;
+    {
+        uint8_t k;
+        for (k = 0; k < CS; k++) cellRow[k] = (int)g_W * k;
+    }
+}
+
+void path_ready(void)
+{
+    while (!path_prepare_step())
+        ;
+}
+
+void path_prepare(void)
+{
+    path_prepare_begin();
+    path_ready();
+}
+
+bool path_prepare_step(void)
+{
+    uint8_t cx, cy = prepRow;
+    uint16_t c;
+    if (prepDone) return true;
+    {
         uint16_t y0 = (uint16_t)cy * CS;
         uint8_t h = cell_size(y0, g_H);
+        c = (uint16_t)cy * cW;
         cRow[cy] = c;
         for (cx = 0; cx < cW; cx++, c++) {
             uint16_t x0 = (uint16_t)cx * CS;
-            uint8_t w = cell_size(x0, g_W), lab[64], i, cross = 0, pools = 0;
+            const uint8_t *base = g_map + g_rowStart[y0] + x0;
+            uint8_t w = cell_size(x0, g_W), lab[64], i, cross = 0, pools = 0, c0 = *base, lx, ly;
             uint8_t sides[4] = {0, 0, 0, 0};
+            cSplit[c] = 0;
+            /* open sea: the whole cell is one water body (most cells) */
+            if ((c0 & T_COMP) && !(c0 & T_TERR)) {
+                bool same = true;
+                for (ly = 0; ly < h && same; ly++) {
+                    const uint8_t *r = base + cellRow[ly];
+                    for (lx = 0; lx < w; lx++)
+                        if (r[lx] != c0) {
+                            same = false;
+                            break;
+                        }
+                }
+                if (same) {
+                    cCross[c] = (uint8_t)(open_cross(base, w, h, c0, true) |
+                                          (open_cross(base, w, h, c0, false) << 4));
+                    continue;
+                }
+            }
             memset(lab, 0, sizeof lab);
-            for (i = 0; i < 64; i++) {
-                uint8_t lx = i & 7, ly = i >> 3, b, sd;
-                if (lx >= w || ly >= h || lab[i]) continue;
-                b = g_map[TILE(x0 + lx, y0 + ly)];
-                if ((b & T_TERR) || !(b & T_COMP)) continue;
-                if (pools < 4) pools++; /* a 5th pool shares the 4th one's slot */
-                sd = cell_fill(x0, y0, w, h, i, lab, pools);
-                sides[pools - 1] |= sd;
-                if ((sd & 1) && !(cross & 0x07)) cross |= b & T_COMP;
-                if ((sd & 4) && !(cross & 0x70)) cross |= (uint8_t)((b & T_COMP) << 4);
+            for (ly = 0; ly < h; ly++) {
+                const uint8_t *r = base + cellRow[ly];
+                for (lx = 0; lx < w; lx++) {
+                    uint8_t b = r[lx], sd;
+                    i = (uint8_t)((ly << 3) | lx);
+                    if (lab[i] || (b & T_TERR) || !(b & T_COMP)) continue;
+                    if (pools < 4) pools++; /* a 5th pool shares the 4th one's slot */
+                    sd = cell_fill(base, w, h, i, lab, pools);
+                    sides[pools - 1] |= sd;
+                    if ((sd & 1) && !(cross & 0x07)) cross |= b & T_COMP;
+                    if ((sd & 4) && !(cross & 0x70)) cross |= (uint8_t)((b & T_COMP) << 4);
+                }
             }
             cCross[c] = cross;
-            cSplit[c] = 0;
             if (pools > 1 && nSplit < NSPLIT) {
                 uint8_t *m = splitLab[nSplit];
                 memset(m, 0, 16);
@@ -505,7 +593,28 @@ void path_prepare(void)
             }
         }
     }
+    if (++prepRow == cH) {
+        prepDone = true;
+        guideIdx = mapIdx;
+        guideVar = g_mi.var;
+    }
+    return prepDone;
 }
+
+#ifdef HOST
+uint16_t path_guide_hash(void)
+{
+    uint16_t c, h = (uint16_t)(cN + nSplit * 7);
+    uint8_t k;
+    for (c = 0; c < cN; c++) h = (uint16_t)(h * 31 + cCross[c] * 7 + cSplit[c]);
+    for (k = 0; k < nSplit; k++) {
+        uint8_t i;
+        for (i = 0; i < 16; i++) h = (uint16_t)(h * 31 + splitLab[k][i]);
+        for (i = 0; i < 4; i++) h = (uint16_t)(h * 31 + splitSides[k][i]);
+    }
+    return h;
+}
+#endif
 
 /* pool of local tile i (ly * 8 + lx) of cell c */
 FORCE_INLINE uint8_t pool_at(uint16_t c, uint8_t i)
@@ -765,7 +874,7 @@ static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
 #ifdef PATH_STATS
         g_pathPops++;
 #endif
-        py = ty(t);
+        py = ty_in(t);
         px = (uint16_t)(t - g_rowStart[py]);
         for (i = 0; i < 4; i++) {
             static const uint8_t backBits[4] = {1 << W_DIRSH, 0, 3 << W_DIRSH, 2 << W_DIRSH};
@@ -833,6 +942,7 @@ static bool route(tile_t from, tile_t to, uint8_t slot)
 {
     uint8_t a = g_map[from], b = g_map[to];
     if (IS_LAND(a) || IS_LAND(b) || !(a & T_COMP) || (a & T_COMP) != (b & T_COMP)) return false;
+    path_ready();
     cUse = false;
     if (mdist(from, to) < SHORT_HOP && search(from, to, slot, SHORT_BUDGET)) return true;
     cUse = cOn;

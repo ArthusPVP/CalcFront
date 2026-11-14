@@ -63,7 +63,9 @@ void sim_tables(void);
 
 #define FORCE_INLINE static inline __attribute__((always_inline))
 
-FORCE_INLINE uint16_t ty(tile_t t)
+/* row of tile t: ty_in() is inlined for the hot paths (distances, route
+ * search, conquests, drawing), ty() is a call everywhere else */
+FORCE_INLINE uint16_t ty_in(tile_t t)
 {
     u16b_t u;
     uint16_t y;
@@ -72,7 +74,8 @@ FORCE_INLINE uint16_t ty(tile_t t)
     while (t >= g_rowStart[y + 1]) y++;
     return y;
 }
-FORCE_INLINE uint16_t tx(tile_t t) { return (uint16_t)(t - g_rowStart[ty(t)]); }
+uint16_t ty(tile_t t);
+uint16_t tx(tile_t t);
 FORCE_INLINE uint8_t bitget(const uint8_t *a, tile_t t)
 {
     u16b_t u;
@@ -321,7 +324,7 @@ extern clock_t g_perf[12];
 #define PERF_ADD(i) (g_perf[i] += clock() - perf_t0, perf_t0 = clock())
 #define PERF_SKIP() (perf_t0 = clock())
 /* finer timers for the benchmark: PROF(i, statement) */
-extern clock_t g_prof[16];
+extern clock_t g_prof[16], g_boot[6];
 #define PROF(i, stmt)                                                                 \
     do {                                                                              \
         clock_t prof_t0_ = clock();                                                   \
@@ -346,6 +349,8 @@ void rnd_seed(uint32_t s);
 void rnd_get(uint8_t *s); /* 4 bytes of generator state */
 void rnd_set(const uint8_t *s);
 uint16_t isqrt32(uint32_t v);
+uint32_t mulq8(uint32_t x, uint16_t k); /* (x * k) >> 8 */
+uint32_t mulq4(uint32_t x, uint16_t k); /* (x * k) >> 4 */
 uint16_t tdist(tile_t a, tile_t b);   /* euclidean distance in tiles */
 uint16_t mdist(tile_t a, tile_t b);   /* manhattan distance in tiles */
 bool near(tile_t a, tile_t b, uint8_t r);
@@ -362,6 +367,7 @@ void plat_map_tiles(const uint8_t *data, uint16_t ntiles, uint8_t comp);
 uint8_t map_variants(uint8_t idx);
 bool map_load_info(uint8_t idx, uint8_t var);
 bool map_load_tiles(uint8_t idx, uint8_t var);
+extern bool g_mapClean; /* g_map unchanged since map_load_tiles (clear it after writing tiles) */
 void conquer(tile_t t, uint8_t p);
 void relinquish(tile_t t);
 bool is_shore(tile_t t);          /* land tile touching navigable water */
@@ -374,8 +380,11 @@ tile_t random_land(void);
 tile_t random_water_near(tile_t c, uint8_t r, uint8_t comp);
 tile_t nearest_own_shore(uint8_t p, tile_t to, uint8_t comp);
 uint8_t coast_bodies(uint8_t p);  /* bit c set: p has land next to water body c */
-void coast_rebuild(void);
-void path_prepare(void);          /* build the coarse route guide (after loading tiles) */
+void coast_rebuild(bool scan);
+void path_prepare(void);          /* build the coarse route guide now (after loading tiles) */
+void path_prepare_begin(void);    /* start it (keeps the last one for the same map) */
+bool path_prepare_step(void);     /* one more row of cells; true when done */
+void path_ready(void);            /* finish it */
 uint8_t path_find(tile_t from, tile_t to);   /* shared, cached; 0xFF on failure */
 void path_release(uint8_t slot);
 void path_reset(void);
