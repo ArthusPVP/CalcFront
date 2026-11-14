@@ -3,6 +3,8 @@
 
 attack_t g_at[MAX_ATTACKS];
 
+#define BUDGET_MAX 60000
+
 static const uint8_t terrMag[4] = {0, 80, 100, 120};
 static const uint8_t terrCost2[4] = {0, 33, 40, 50}; /* tileCost * 2 */
 
@@ -137,8 +139,9 @@ uint32_t incoming_troops(uint8_t p, uint8_t *from)
 
 bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwner)
 {
-    attack_t *a = 0, *o;
+    attack_t *a = 0, *o, *same = 0;
     player_t *pl = &g_pl[att];
+    bool countered = false;
     if (att == def || !pl->alive) return false;
     if (def && (!g_pl[def].alive || ALLIED(att, def))) return false;
     if (removeFromOwner && troops > pl->troops) troops = pl->troops;
@@ -147,45 +150,54 @@ bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwne
     FOR_ATTACKS(o) {
         if (!o->active) {
             if (!a) a = o;
-            continue;
-        }
-        if (o->att == att && o->def == def && !o->retreat) {
-            if (removeFromOwner) pl->troops -= troops;
-            o->troops += troops;
-            return true;
-        }
+        } else if (o->att == att && o->def == def && !o->retreat)
+            same = o;
     }
-    if (!a) return false;
-    a->att = att;
-    a->def = def;
-    a->border = 0;
-    {
+    if (!same) {
         uint16_t found;
+        if (!a) return false;
+        a->att = att;
+        a->def = def;
+        a->border = 0;
         PROF(0, found = scan_front(a, att, def, false));
         if (!found) return false;
     }
     if (removeFromOwner) pl->troops -= troops;
 
-    /* opposing attack: the two stacks cancel out */
+    /* opposing attack: the two stacks cancel out, troop for troop (first,
+     * as in OpenFront, also when this adds to an attack already running) */
     if (def)
         FOR_ATTACKS(o) {
             if (o->active && o->att == def && o->def == att && !o->retreat) {
+                if (def == HUMAN) {
+                    ui_event(EV_COUNTERED, att, 0);
+                    countered = true;
+                }
                 if (o->troops > troops) {
                     o->troops -= troops;
                     return true;
                 }
                 troops -= o->troops;
                 o->active = 0;
+                if (att == HUMAN) ui_event(EV_STOPPED, def, 0);
+                if (!troops) return true;
             }
         }
+    if (same) {
+        same->troops += troops;
+        return true;
+    }
     a->active = 1;
     a->retreat = 0;
     a->troops = troops;
     a->budget = 0;
     a->rescan = 24;
     if (def) {
-        rel_add(def, att, -40);
-        if (def == HUMAN) ui_event(EV_ATTACKED, att, 0);
+        /* the defender's grudge, by difficulty; hitting back at a player
+         * you already hate angers nobody (except on Easy), as in OpenFront */
+        if (g_cfg.difficulty == DIFF_EASY || pl->rel[def] >= -50)
+            rel_add(def, att, (int8_t)(-60 - 10 * (int8_t)g_cfg.difficulty));
+        if (def == HUMAN && !countered) ui_event(EV_ATTACKED, att, 0);
     }
     return true;
 }
@@ -275,7 +287,7 @@ static void run_attack(attack_t *a)
     if (B > 600) B = 600;
     B += rnd_n(5);
     a->budget += B * 64;
-    if (a->budget > 60000) a->budget = 60000;
+    if (a->budget > BUDGET_MAX) a->budget = BUDGET_MAX;
 
     if (def) {
         uint32_t dt = dp->troops, q;
@@ -358,7 +370,13 @@ static void run_attack(attack_t *a)
         cLoss[key] = loss;
         have[key] = 1;
     take:
-        if (a->budget < cost) break;
+        if (a->budget < cost) {
+            /* a full budget always buys the tile: OpenFront takes at least
+             * one tile per tick, so even a hopeless push moves (and dies)
+             * instead of holding its troops forever */
+            if (a->budget < BUDGET_MAX) break;
+            cost = a->budget;
+        }
         a->budget -= (uint24_t)cost;
         a->head = (a->head + 1) & (RING - 1);
         a->count--;

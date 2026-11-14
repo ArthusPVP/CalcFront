@@ -295,16 +295,12 @@ enum {
     EV_ALLY_END,    /* alliance with a expired */
     EV_BETRAYED,    /* a broke the alliance */
     EV_NUKE_IN,     /* a launched a nuke at you */
-    EV_BUILT,       /* structure a finished */
-    EV_CAPTURED,    /* you captured a trade ship of b */
-    EV_TRADE,       /* trade income, a = gold/1000, b = partner */
     EV_BOAT_LAND,   /* boat of a landed on you */
     EV_SAM_HIT,     /* nuke intercepted */
     EV_LOST_UNIT,   /* your unit of type a was lost to b */
     EV_NOGOLD, EV_BADSPOT, EV_NOSILO, EV_NOROUTE, EV_NOTROOPS, EV_BUSY,
-    EV_TARGET,      /* a marked b */
-    EV_SHIP_LOST,   /* your trade ship was captured by a */
-    EV_SUNK,        /* you sank a ship of type a owned by b */
+    EV_COUNTERED,   /* a countered your attack (the stacks cancelled out) */
+    EV_STOPPED,     /* your attack cancelled the one a sent at you */
 };
 
 #if defined(HOST) || defined(CF_PERF)

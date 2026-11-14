@@ -352,13 +352,10 @@ void trade_tick(unit_t *u)
     del_unit(u);
     if (captured) {
         if (g_pl[u->owner].alive) g_pl[u->owner].gold += g;
-        if (u->owner == HUMAN) ui_event(EV_TRADE, (uint8_t)(g / 1000 > 255 ? 255 : g / 1000), a);
         return;
     }
     if (g_pl[a].alive) g_pl[a].gold += g;
     if (g_pl[b].alive) g_pl[b].gold += g;
-    if (a == HUMAN || b == HUMAN)
-        ui_event(EV_TRADE, (uint8_t)(g / 1000 > 255 ? 255 : g / 1000), a == HUMAN ? b : a);
 }
 
 /* ----------------------------------------------------------- warships --- */
@@ -462,8 +459,6 @@ static void capture_trade(unit_t *ws, unit_t *t)
         return;
     }
     rel_add(old, ws->owner, -10);
-    if (old == HUMAN) ui_event(EV_SHIP_LOST, ws->owner, 0);
-    if (ws->owner == HUMAN) ui_event(EV_CAPTURED, 0, old);
     if (++ws->src >= 10) {
         ws->src = 0;
         ws->troops += 5;
@@ -615,7 +610,6 @@ void shell_tick(unit_t *u)
         unit_t *ws = &g_un[u->aux2];
         uint8_t victim = t->owner, kind = t->type;
         if (victim == HUMAN) ui_event(EV_LOST_UNIT, kind, u->owner);
-        if (u->owner == HUMAN) ui_event(EV_SUNK, kind, victim);
         rel_add(victim, u->owner, -10);
         del_unit(t);
         if (ws->type == U_WARSHIP && ws->owner == u->owner) {

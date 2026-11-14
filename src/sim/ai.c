@@ -1,7 +1,11 @@
 /* computer players: tribes (passive grey bots) and nations (smart AI) */
 #include "sim.h"
 
-static const uint8_t thinkEvery[4] = {7, 5, 3, 2}; /* in steps of 8 ticks */
+/* in steps of 8 ticks: a nation acts every 80 / 64 / 56 / 40 ticks, the middle
+ * of OpenFront's ranges (65-100, 55-70, 45-60, 30-50) */
+static const uint8_t thinkEvery[4] = {9, 7, 6, 4};
+/* % of the troop cap a nation keeps before hitting back at an attacker */
+static const uint8_t fightMin[4] = {55, 35, 15, 15};
 
 void ai_init_player(uint8_t p)
 {
@@ -54,10 +58,9 @@ static uint8_t pick_neighbor(uint8_t p, bool tribeStyle)
             score = o->troops + 1;
             if (o->type == PT_TRIBE) score >>= 1;
             if (o->traitor) score >>= 1;
-            if (pl->rel[i] < -20) score -= score >> 2;
+            if (pl->rel[i] < -50) score -= score >> 2; /* hostile */
             if (pl->rel[i] > 30) score += score >> 1;
             if (g_pl[HUMAN].alive && ALLIED(p, HUMAN) && g_pl[HUMAN].target == i) score >>= 1;
-            if (i == HUMAN && g_cfg.difficulty >= DIFF_HARD) score -= score >> 2;
             if (i == pl->aiEnemy) score >>= 1;
         }
         if (score < bestScore) {
@@ -367,11 +370,23 @@ static void nation_think(uint8_t p)
     if ((pl->aiFlags & 15) == 0) scan_player(p);
     answer_requests(p);
 
-    if (pl->aiEnemy && (!g_pl[pl->aiEnemy].alive || ALLIED(p, pl->aiEnemy))) pl->aiEnemy = 0;
+    /* forget an enemy once the war is over and the grudge has faded */
+    if (pl->aiEnemy && (!g_pl[pl->aiEnemy].alive || ALLIED(p, pl->aiEnemy) ||
+                        (pl->rel[pl->aiEnemy] >= -50 && !attacking(p, pl->aiEnemy) &&
+                         !attacking(pl->aiEnemy, p))))
+        pl->aiEnemy = 0;
     inc = incoming_troops(p, &from);
-    if (inc && from) {
-        pl->aiEnemy = from;
-        if (diff >= DIFF_MEDIUM) MASKSET(pl->embargo, from);
+    if (inc && from) pl->aiEnemy = from;
+    {
+        /* trade: stop with the players we hate; on Easy and Medium start
+         * again once the grudge has faded to neutral (OpenFront) */
+        uint8_t i;
+        for (i = 1; i <= g_nplayers; i++) {
+            if (pl->rel[i] < -50)
+                MASKSET(pl->embargo, i);
+            else if (pl->rel[i] >= 0 && diff <= DIFF_MEDIUM)
+                MASKCLR(pl->embargo, i);
+        }
     }
 
     PROF(8, nation_build(p));
@@ -400,17 +415,22 @@ static void nation_think(uint8_t p)
             return;
     }
 
-    /* fight back */
-    if (inc && from && !ALLIED(p, from) && pct >= 20) {
+    /* fight back, once saved up as OpenFront's nations do: Easy only past
+     * its attack trigger, Medium past its reserve, Hard and up at once */
+    if (inc && from && !ALLIED(p, from) && pct >= fightMin[diff]) {
         if (attack_start(p, from, pl->troops / 2, true)) return;
     }
 
     if (pct < (uint32_t)(70 - diff * 8)) return;
 
     target = pick_neighbor(p, false);
+    /* spare the player on the lower difficulties, as OpenFront does: on Easy
+     * attack them one time in 4, on Medium three times in 4 */
+    if (target == HUMAN && diff <= DIFF_MEDIUM && (rnd_n(4) == 0) == (diff == DIFF_MEDIUM)) return;
     if (target) {
         player_t *o = &g_pl[target];
-        if (o->type == PT_TRIBE || pl->troops > (o->troops / 4) * 3 || target == pl->aiEnemy) {
+        if (o->type == PT_TRIBE || pl->troops > (o->troops / 4) * 3 ||
+            (target == pl->aiEnemy && o->troops / 3 < pl->troops)) {
             pl->aiEnemy = target;
             if (attack_start(p, target, (pl->troops / 10) * (4 + diff), true)) return;
         }

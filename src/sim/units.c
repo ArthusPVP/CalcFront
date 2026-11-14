@@ -452,7 +452,6 @@ void units_tick(void)
                     u->hp = 1;
                     if (u->type == U_CITY) g_pl[u->owner].cityLv += u->level;
                     if (IS_STATIONABLE(u->type)) rail_mark_dirty();
-                    if (u->owner == HUMAN) ui_event(EV_BUILT, u->type, 0);
                     ui_dirty_unit(u->pos);
                 }
             } else if (u->type == U_PORT)

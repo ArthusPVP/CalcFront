@@ -366,26 +366,27 @@ static void set_menu(uint8_t m)
     }
 }
 
-/* Messages for each event, EV_ATTACKED onward: %a / %b = name of player a / b,
- * %u = unit type a, %k = a thousands, %t = " to " + name of b if b. */
+/* Messages for each event, EV_ATTACKED onward: %a = name of player a,
+ * %u = unit type a, %t = " to " + name of b if b. Only what needs the player's
+ * attention: no trade income, finished buildings or naval small talk. */
 static const char *const evText[] = {
     "%a attacks you!", "%a was eliminated", "%a wants an alliance", "%a is now your ally",
-    "%a refused", "Alliance ended: %a", "%a betrayed you!", "NUKE incoming from %a", "%u ready",
-    "Captured a trade ship of %b", "Trade with %b +$%kK", "%a landed on your coast!",
-    "Nuke intercepted by SAM", "%u lost%t", "Not enough gold", "Cannot build here",
-    "No missile silo ready", "No sea route", "Not enough troops", "Already 3 boats at sea", 0,
-    "%a captured your trade ship", "Sank a %u of %b"};
-static const uint8_t evColor[] = {
-    C_RED, C_YELLOW, C_CYAN, C_GREEN, C_WHITE, C_YELLOW, C_RED, C_RED, C_GREEN, C_GREEN,
-    C_YELLOW, C_RED, C_CYAN, C_RED, C_WHITE, C_WHITE, C_WHITE, C_WHITE, C_WHITE, C_WHITE, 0,
-    C_RED, C_GREEN};
+    "%a refused", "Alliance ended: %a", "%a betrayed you!", "NUKE incoming from %a",
+    "%a landed on your coast!", "Nuke intercepted by SAM", "%u lost%t", "Not enough gold",
+    "Cannot build here", "No missile silo ready", "No sea route", "Not enough troops",
+    "Already 3 boats at sea", "%a countered your attack!", "You stopped %a's attack"};
+static const uint8_t evColor[] = {C_RED,   C_YELLOW, C_CYAN,  C_GREEN, C_WHITE, C_YELLOW, C_RED,
+                                  C_RED,   C_RED,    C_CYAN,  C_RED,   C_WHITE, C_WHITE,  C_WHITE,
+                                  C_WHITE, C_WHITE,  C_WHITE, C_RED,   C_GREEN};
 
 void ui_event(uint8_t type, uint8_t a, uint8_t b)
 {
     char buf[48], *p = buf;
     const char *f;
-    if (type < EV_ATTACKED || type > EV_SUNK || !(f = evText[type - EV_ATTACKED])) return;
+    if (type < EV_ATTACKED || type > EV_STOPPED) return;
+    f = evText[type - EV_ATTACKED];
     if (type == EV_DEAD && (a == HUMAN || (g_pl[a].type == PT_TRIBE && b != HUMAN))) return;
+    if (type == EV_LOST_UNIT && a == U_TRADE) return; /* trade ships come and go */
     if (type == EV_ALLY_REQ) {
         reqPlayer = a;
         reqUntil = clock() + REQ_TIME;
@@ -401,9 +402,7 @@ void ui_event(uint8_t type, uint8_t a, uint8_t b)
         }
         switch (*++f) {
         case 'a': p = s_cat(p, g_pl[a].name); break;
-        case 'b': p = s_cat(p, g_pl[b].name); break;
         case 'u': p = s_cat(p, unitNames[a]); break;
-        case 'k': p = s_num(p, a); break;
         default:
             if (b) {
                 p = s_cat(p, " to ");

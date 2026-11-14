@@ -294,6 +294,13 @@ static void economy(uint8_t p)
         PROF(2, calc_max(p));
         max = pl->maxTroops;
         if (pl->traitor) pl->traitor = pl->traitor > 16 ? pl->traitor - 16 : 0;
+        {
+            /* grudges fade: 1 point per 16 ticks toward neutral (OpenFront 0.05/tick) */
+            int8_t *r = pl->rel + 1;
+            uint8_t k;
+            for (k = 1; k < MAXP; k++, r++)
+                if (*r) *r += *r < 0 ? 1 : -1;
+        }
     }
     pl->growth = 0;
     if (tr >= max) {
