@@ -391,8 +391,8 @@ static void nuke_tick(unit_t *u)
                 tile_t t;
                 unit_t *s;
                 if (!victim || !v->alive) break;
-                t = TILE(v->minx + rnd_n(v->maxx - v->minx + 1),
-                         v->miny + rnd_n(v->maxy - v->miny + 1));
+                t = rnd_tile(v->minx, (uint16_t)(v->maxx - v->minx + 1), v->miny,
+                             (uint16_t)(v->maxy - v->miny + 1));
                 if (!IS_LAND(g_map[t]) || OWNER_OF(t) != victim) continue;
                 n--;
                 s = sam_cover(t, by, victim);

@@ -275,9 +275,9 @@ void kill_player(uint8_t p, uint8_t killer)
     attacks_drop_player(p);
     units_drop_player(p);
     for (i = 1; i <= g_nplayers; i++) {
-        g_pl[i].allies &= ~BIT(p);
-        g_pl[i].nbrs &= ~BIT(p);
-        g_pl[i].reqFrom &= ~BIT(p);
+        MASKCLR(g_pl[i].allies, p);
+        MASKCLR(g_pl[i].nbrs, p);
+        MASKCLR(g_pl[i].reqFrom, p);
         if (g_pl[i].target == p) g_pl[i].target = 0;
         if (g_pl[i].aiEnemy == p) g_pl[i].aiEnemy = 0;
     }

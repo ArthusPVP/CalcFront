@@ -17,9 +17,9 @@ FORCE_INLINE uint8_t own_nbrs(tile_t t, uint8_t p)
 }
 
 /* first tile from p to end (inclusive) that is land of player o, or 0. On
- * the calculator this is hand-written assembly (src/asm/scan.s). */
-#ifdef HOST
-static const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o)
+ * the calculator this is hand-written assembly (src/asm/scan.s); the C
+ * version serves the PC harness and checks the assembly in profiling builds. */
+const uint8_t *next_owned_c(const uint8_t *p, const uint8_t *end, uint8_t o)
 {
     for (; p <= end; p++) {
         uint8_t b = *p;
@@ -27,6 +27,8 @@ static const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o
     }
     return 0;
 }
+#if defined(HOST) || defined(CF_NOASM)
+#define next_owned next_owned_c
 #else
 const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o);
 #endif

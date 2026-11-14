@@ -327,9 +327,16 @@ int main(int argc, char **argv)
     if (verbose)
         printf("map %s %ux%u land=%u S=%u L16=%u players=%u\n", g_mi.name, g_W, g_H, g_mi.land,
                g_S, g_L16, g_nplayers);
+    if (getenv("CF_HUMAN")) printf("ck 0 %04X\n", sim_checksum());
     c0 = clock();
     for (t = 0; t < ticks; t++) {
         game_tick();
+        if (getenv("CF_HUMAN")) {
+            static const unsigned at[] = {1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000};
+            unsigned q;
+            for (q = 0; q < 11; q++)
+                if (g_tick == at[q]) printf("ck %u %04X\n", at[q], sim_checksum());
+        }
         if (t == saveAt) save_roundtrip();
         if ((t & 127) == 0 || t == saveAt) check();
         if (every && t % every == 0) dump(dir, frame++);

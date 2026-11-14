@@ -195,6 +195,8 @@ extern const uint32_t g_bits[32];
  * is a slow library loop on the eZ80 */
 #define MASKBIT(m, b) ((((const uint8_t *)&(m))[g_bitLo[(uint8_t)(b)]] & g_bitMask[(uint8_t)(b)]) != 0)
 #define ALLIED(a, b) MASKBIT(g_pl[a].allies, b)
+#define MASKSET(m, b) (((uint8_t *)&(m))[g_bitLo[(uint8_t)(b)]] |= g_bitMask[(uint8_t)(b)])
+#define MASKCLR(m, b) (((uint8_t *)&(m))[g_bitLo[(uint8_t)(b)]] &= (uint8_t)~g_bitMask[(uint8_t)(b)])
 
 uint32_t gold_mul(uint32_t g);
 bool can_trade(uint8_t a, uint8_t b);
@@ -339,6 +341,7 @@ uint32_t fx_exp2(int16_t l);             /* 2^(l/256) */
 uint32_t fx_pow(uint32_t x, uint8_t p8); /* x^(p8/256) */
 uint16_t rnd(void);
 uint16_t rnd_n(uint16_t n); /* 0..n-1 */
+tile_t rnd_tile(uint16_t x0, uint16_t w, uint16_t y0, uint16_t h);
 void rnd_seed(uint32_t s);
 void rnd_get(uint8_t *s); /* 4 bytes of generator state */
 void rnd_set(const uint8_t *s);

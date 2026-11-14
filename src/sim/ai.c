@@ -15,7 +15,7 @@ static tile_t rand_tile_of(uint8_t p, uint8_t tries)
     uint16_t w = (uint16_t)(pl->maxx - pl->minx + 1), h = (uint16_t)(pl->maxy - pl->miny + 1);
     if (!pl->tiles) return NO_TILE;
     while (tries--) {
-        tile_t t = TILE(pl->minx + rnd_n(w), pl->miny + rnd_n(h));
+        tile_t t = rnd_tile(pl->minx, w, pl->miny, h);
         uint8_t b = g_map[t];
         if (IS_LAND(b) && (b & T_OWNER) == p) return t;
     }
@@ -331,7 +331,7 @@ static void nation_boat(uint8_t p)
     if (victim && (rnd() & 1)) {
         player_t *o = &g_pl[victim];
         for (i = 0; i < 40; i++) {
-            tile_t t = TILE(o->minx + rnd_n(o->maxx - o->minx + 1), o->miny + rnd_n(o->maxy - o->miny + 1));
+            tile_t t = rnd_tile(o->minx, (uint16_t)(o->maxx - o->minx + 1), o->miny, (uint16_t)(o->maxy - o->miny + 1));
             if (IS_LAND(g_map[t]) && OWNER_OF(t) == victim && shore_on(t, seas)) {
                 if (launch_boat(p, t, pl->troops / 3)) return;
                 break;
@@ -371,7 +371,7 @@ static void nation_think(uint8_t p)
     inc = incoming_troops(p, &from);
     if (inc && from) {
         pl->aiEnemy = from;
-        if (diff >= DIFF_MEDIUM) pl->embargo |= BIT(from);
+        if (diff >= DIFF_MEDIUM) MASKSET(pl->embargo, from);
     }
 
     PROF(8, nation_build(p));

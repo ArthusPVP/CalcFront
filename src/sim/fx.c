@@ -42,7 +42,22 @@ void rnd_set(const uint8_t *s)
     rd = s[3];
 }
 
-uint16_t rnd(void) { return (uint16_t)(rnd8() | ((uint16_t)rnd8() << 8)); }
+/* two calls, in a fixed order: inside one expression the compiler may make
+ * them in either order, and the PC and the calculator would then differ */
+uint16_t rnd(void)
+{
+    u16b_t r;
+    r.b[0] = rnd8();
+    r.b[1] = rnd8();
+    return r.v;
+}
+
+/* a random tile in the box x0..x0+w-1, y0..y0+h-1 (x drawn first) */
+tile_t rnd_tile(uint16_t x0, uint16_t w, uint16_t y0, uint16_t h)
+{
+    uint16_t x = (uint16_t)(x0 + rnd_n(w));
+    return TILE(x, y0 + rnd_n(h));
+}
 
 uint16_t rnd_n(uint16_t n)
 {

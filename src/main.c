@@ -204,7 +204,27 @@ static const char *const perfNames[12] = {"eco", "atk", "uni", "ai", "bld", "mov
  * BENCH_TICKS the totals since the start are shown on a full screen. */
 #define BENCH_TICKS 2000
 static uint32_t benchSum[12], benchFrames;
-static uint16_t benchCheck;
+static uint16_t benchCheck, benchCk[12];
+static const uint16_t benchAt[12] = {0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000};
+
+const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o);
+const uint8_t *next_owned_c(const uint8_t *p, const uint8_t *end, uint8_t o);
+
+/* the assembly scan against the C one on random rows: number of mismatches */
+static uint16_t asm_selftest(void)
+{
+    static uint8_t buf[600];
+    uint16_t k, bad = 0;
+    for (k = 0; k < sizeof buf; k++) buf[k] = (uint8_t)(rnd() & (rnd() & 1 ? 0xE3 : 0x63));
+    for (k = 0; k < 3000; k++) {
+        uint16_t a = rnd_n(590) + 4, b = a + rnd_n(300);
+        uint8_t o = (uint8_t)rnd_n(4);
+        if (b > 595) b = 595;
+        if (next_owned(buf + a, buf + b, o) != next_owned_c(buf + a, buf + b, o)) bad++;
+        if (next_owned(buf + b, buf + a, o) != next_owned_c(buf + b, buf + a, o)) bad++;
+    }
+    return bad;
+}
 
 static void bench_report(void)
 {
@@ -228,6 +248,9 @@ static void bench_report(void)
         s_cat(p, (i < 4 || i == 11) ? " /100t" : " us/fr");
         hud_text(buf, 20, 26 + i * 14, i < 4 || i == 11 ? C_WHITE : C_CYAN);
     }
+    p = s_cat(buf, "asm mismatches ");
+    s_num(p, asm_selftest());
+    hud_center(buf, 226, C_YELLOW);
     p = s_cat(buf, "checksum ");
     for (i = 0; i < 4; i++) *p++ = "0123456789ABCDEF"[(benchCheck >> (12 - 4 * i)) & 15];
     *p = 0;
@@ -259,6 +282,13 @@ static void bench_report(void)
                 p = s_cat(buf, pn[i]);
                 s_num(p, v[i]);
                 hud_text(buf, 12 + (i % 3) * 100, 170 + (i / 3) * 14, C_CYAN);
+            }
+            for (i = 0; i < 12; i++) {
+                uint8_t j;
+                p = buf;
+                for (j = 0; j < 4; j++) *p++ = "0123456789ABCDEF"[(benchCk[i] >> (12 - 4 * j)) & 15];
+                *p = 0;
+                hud_text(buf, 12 + (i % 6) * 50, 212 + (i / 6) * 12, C_YELLOW);
             }
             p = s_cat(buf, "overflows ");
             s_num(p, g_pathOverflow);
@@ -608,7 +638,7 @@ static const help_t helpRows[] = {
     {0, CAPS, "+|-", "Zoom in and out"},
     {0, CAPS, "enter", "Attack under the cursor"},
     {0, CAPS, "clear", "Back. On the map: the pause\nmenu (resume, help, save, quit)"},
-    {0, CAPS, "y=|window|zoom|trace|graph", "\nThe five actions on the bottom bar;\nthey change with each menu"},
+    {0, CAPS, "y=|window|zoom|trace|graph", "\nThe actions on the bottom bar,\nwhich change with each menu"},
 
     {0, C_GREEN, "Start", "Pick free land away from the\nothers and press Start"},
     {0, C_RED, "Attack", "Free land first, then weak\nneighbours. More > Atk -/+"},
@@ -1462,6 +1492,7 @@ static bool play(bool resume)
         }
         r_center(curx, cury);
         memset(benchSum, 0, sizeof benchSum);
+        benchCk[0] = sim_checksum();
         memset(g_prof, 0, sizeof g_prof);
         benchFrames = 0;
         spawned = spectate = true;
@@ -1606,6 +1637,11 @@ static bool play(bool resume)
                 game_tick();
 #ifdef CF_PERF
                 if (g_tick == BENCH_TICKS) benchCheck = sim_checksum();
+                {
+                    uint8_t q;
+                    for (q = 1; q < 12; q++)
+                        if (g_tick == benchAt[q]) benchCk[q] = sim_checksum();
+                }
 #endif
                 last += period / speed;
                 n++;
@@ -1653,7 +1689,11 @@ static bool play(bool resume)
                 }
             }
 
+#ifdef CF_PERF
+            if (0) { /* benchmark: leave requests pending, as the PC harness does */
+#else
             if (menu == M_REQ && ((long)(clock() - reqUntil) >= 0 || !MASKBIT(g_pl[HUMAN].reqFrom, reqPlayer))) {
+#endif
                 if (MASKBIT(g_pl[HUMAN].reqFrom, reqPlayer)) ally_answer(reqPlayer, HUMAN, false);
                 set_menu(menuBack);
             }

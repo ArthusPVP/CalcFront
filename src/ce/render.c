@@ -414,6 +414,8 @@ static bool on_screen(int cx, int cy) { return cx > -12 && cx < SCR_W + 12 && cy
 #define CH 15
 static uint8_t dcell[CH][CW];
 
+static bool dirtyAny; /* some cell is marked this frame */
+
 static void mark(int x0, int y0, int x1, int y1)
 {
     int cx, cy;
@@ -422,6 +424,7 @@ static void mark(int x0, int y0, int x1, int y1)
     if (x1 >= SCR_W) x1 = SCR_W - 1;
     if (y1 >= vh) y1 = vh - 1;
     if (x0 > x1 || y0 > y1) return;
+    dirtyAny = true;
     for (cy = y0 >> CSH; cy <= y1 >> CSH; cy++)
         for (cx = x0 >> CSH; cx <= x1 >> CSH; cx++) dcell[cy][cx] = 1;
 }
@@ -545,6 +548,7 @@ static void overlays(bool all)
         if (!IS_STRUCT(u->type)) continue;
         drawnAt[i] = NO_TILE;
         drawnType[i] = u->type;
+        if (!all && !dirtyAny) continue; /* nothing painted over: still on screen */
         scr_xy(u->pos, &cx, &cy);
         if (!on_screen(cx, cy) || !(all || touched(cx - 9, cy - 4, cx + 9, cy + 7))) continue;
 #ifdef CF_PERF
@@ -573,6 +577,7 @@ static void overlays(bool all)
         drawnType[i] = t;
         /* what else forces a repaint: warship health, explosion size */
         drawnLevel[i] = t == U_WARSHIP ? u->hp : u->level;
+        if (!all && !changed && !dirtyAny && i != r_sel && t != U_BOOM) continue;
         scr_xy(u->pos, &cx, &cy);
         if (t == U_BOOM) {
             int r = u->level * zoom;
@@ -775,6 +780,7 @@ void r_full(void)
     drawnCamX = camx;
     drawnCamY = camy;
     memset(dcell, 1, sizeof dcell);
+    dirtyAny = true;
     overlays(true);
     cursor();
 }
@@ -837,6 +843,7 @@ void r_frame(void)
         return;
     }
     memset(dcell, 0, sizeof dcell);
+    dirtyAny = false;
     memset(paintedT, 0xFF, sizeof paintedT);
     if ((camx != drawnCamX || camy != drawnCamY) && !slide_view()) {
         r_full();

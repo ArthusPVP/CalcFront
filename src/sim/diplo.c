@@ -16,11 +16,11 @@ void rel_add(uint8_t p, uint8_t other, int8_t d)
 static void make_allies(uint8_t a, uint8_t b)
 {
     uint16_t until = (uint16_t)((g_tick >> 4) + ALLY_TICKS16);
-    g_pl[a].allies |= BIT(b);
-    g_pl[b].allies |= BIT(a);
+    MASKSET(g_pl[a].allies, b);
+    MASKSET(g_pl[b].allies, a);
     g_pl[a].allyUntil[b] = g_pl[b].allyUntil[a] = until;
-    g_pl[a].reqFrom &= ~BIT(b);
-    g_pl[b].reqFrom &= ~BIT(a);
+    MASKCLR(g_pl[a].reqFrom, b);
+    MASKCLR(g_pl[b].reqFrom, a);
     rel_add(a, b, 40);
     rel_add(b, a, 40);
     attack_retreat(a, b);
@@ -36,7 +36,7 @@ void ally_request(uint8_t from, uint8_t to)
         if (from == HUMAN || to == HUMAN) ui_event(EV_ALLY_OK, from == HUMAN ? to : from, 0);
         return;
     }
-    g_pl[to].reqFrom |= BIT(from);
+    MASKSET(g_pl[to].reqFrom, from);
     if (to == HUMAN) ui_event(EV_ALLY_REQ, from, 0);
 }
 
@@ -44,7 +44,7 @@ void ally_answer(uint8_t from, uint8_t to, bool yes)
 {
     /* `to` answers the request made by `from` */
     if (!MASKBIT(g_pl[to].reqFrom, from)) return;
-    g_pl[to].reqFrom &= ~BIT(from);
+    MASKCLR(g_pl[to].reqFrom, from);
     if (yes && g_pl[from].alive && g_pl[to].alive)
         make_allies(from, to);
     else
@@ -56,8 +56,8 @@ void ally_break(uint8_t a, uint8_t b)
 {
     uint8_t i;
     if (!ALLIED(a, b)) return;
-    g_pl[a].allies &= ~BIT(b);
-    g_pl[b].allies &= ~BIT(a);
+    MASKCLR(g_pl[a].allies, b);
+    MASKCLR(g_pl[b].allies, a);
     g_pl[a].traitor = 300;
     rel_add(b, a, -100);
     /* everyone trusts a traitor less */
@@ -76,8 +76,8 @@ void diplo_tick(void)
         for (b = (uint8_t)(a + 1); b <= g_nplayers; b++) {
             if (!MASKBIT(pa->allies, b)) continue;
             if ((int16_t)(now - pa->allyUntil[b]) >= 0) {
-                pa->allies &= ~BIT(b);
-                g_pl[b].allies &= ~BIT(a);
+                MASKCLR(pa->allies, b);
+                MASKCLR(g_pl[b].allies, a);
                 if (a == HUMAN || b == HUMAN) ui_event(EV_ALLY_END, a == HUMAN ? b : a, 0);
             }
         }

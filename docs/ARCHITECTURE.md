@@ -45,7 +45,7 @@ exist. Tiles are indexed `y * width + x` (`tile_t`, 16-bit; `0xFFFF` = none).
 | File | Role |
 |---|---|
 | `sim.h` | All shared types and declarations: tiles, players, attacks, units, events, the scratch block, and shift-free inline helpers (`tx`, `ty`, `bitget`, `bitset`). |
-| `tile_tab.h`, `fx_tab.h` | Generated lookup tables (bitmap indices, log2 and exp2 mantissas). |
+| `fx_tab.h` | Generated log2 and exp2 tables. The bitmap index tables (`g_bitHi`, `g_bitLo`, `g_bitMask`) are filled at startup by `sim_tables()`, in static RAM instead of program RAM. |
 | `fx.c` | Fixed-point math (`fx_log2`, `fx_exp2`, `fx_pow` for OpenFront's `^0.6` and `^0.73`), random numbers (an 8-bit Jenkins generator), distances. Written with byte operations, because multi-bit shifts are slow loops on the eZ80. |
 | `map.c` | Map file loading (header, size variants, nation list; the land total is counted from the tiles), ownership changes (`conquer`, `relinquish`), coastline queries, player bounding boxes and neighbours, straight lines, and ship routes: a greedy best-first search over one water body with a shared cache of routes. Long searches are guided by a coarse map of 8×8-tile cells: a breadth-first search over (cell, pool of water) from the goal gives each cell its distance, and the tile search expands the tile with the fewest cells left. Cells split by a headland keep a 2-bit pool number per tile so the guide never jumps across an isthmus. |
 | `save.c` | Saving and resuming: core values, players, active attacks, units, then the owner and fallout of every land tile, run-length coded. Water, terrain, the structure bitmap, railways, ship routes and per-tick caches are rebuilt on load. The bytes go through `plat_save_write` / `plat_save_read`. |
@@ -69,6 +69,18 @@ needed → AI → diplomacy every 16 ticks → win check every 32 ticks.
 | `ce/render.c` | Draws the map straight into video memory. When the camera moves by less than a screen, the picture already drawn slides by a block copy and only the strips that came into view are painted; a full redraw happens on zoom changes and big jumps. Otherwise each frame repaints only tiles that changed, the area under sprites that moved, and sprites or buildings that a 16×16 dirty-cell grid says were painted over. Sprites are pre-built masks (ships: x for boats, dot for trade, + for warships); trade ships and trains are skipped at zoom 1. Also the cursor, nuke rings, explosion rings and the setup preview. |
 | `ce/hud.c` | Number formatting (troops shown /10 like OpenFront, percentages, times), the screen layout for normal and pro mode, the status bar, the info line and the action-key bar. Each part remembers what it shows and is redrawn only when that changes. |
 | `ce/ui.h` | Palette indices, screen layout, renderer and HUD declarations. |
+
+`src/asm/scan.s` is the one piece of hand-written eZ80: the loop that finds the
+next tile of a player along a row, used by every attack front scan (the C
+version in `attack.c` serves the PC harness).
+
+**Code size and speed rules.** The build uses `-Oz -fno-inline-functions`:
+inlining big functions into their callers makes eZ80 code larger. Small helpers
+on hot paths are `FORCE_INLINE` instead. `player_t` and `unit_t` are padded to
+256 and 32 bytes so indexing is a shift, not a multiply call. Bit tests on
+32-bit player masks read one byte (`MASKBIT`, `MASKSET`, `MASKCLR`): a variable
+32-bit shift is a slow library loop. Each player's coasts are counted per water
+body as tiles change hands, so finding the seas a player can sail needs no scan.
 
 ## Other folders
 
@@ -95,7 +107,21 @@ name), then the tile data, ZX0-compressed on the calculator.
 
 ## Profiling
 
-Build with `make CFLAGS="-Wall -Wextra -Oz -DCF_PERF"`. Every 100 ticks the
-bottom of the screen shows the time spent in each part: economy, attacks, units,
-AI, buildings, moving sprites, erasing, tiles, cursor, full redraws and HUD.
+Build with `make CFLAGS="-Wall -Wextra -Oz -fno-inline-functions -DCF_PERF"`.
+Every 100 ticks the bottom of the screen shows the time spent in each part:
+economy, attacks, units, AI, buildings, moving sprites, erasing, tiles, cursor,
+full redraws and HUD.
+
+That build is also a **benchmark**: a new game uses a fixed seed, the human
+spawns on its own and watches at x4 speed, and alliance requests stay
+unanswered. At tick 2000 it shows the totals, a page of finer timers (front
+scans, conquests, routes, ports...) with route statistics, a check of the
+assembly scan against the C one, and a checksum of the game state. The PC
+harness prints the same checksum for the same game:
+`CF_HUMAN=1 CF_SIZE=1 ./host/cfhost world 2 20 10 2000 12648430` (World Large,
+Hard, 20 nations, 10 tribes on the setup screen), and both show checksums at
+ticks 0, 1, 2, 5 ... 2000, so a difference points at the first tick that went
+wrong. Equal checksums mean the calculator played exactly the game the PC did.
+Random numbers are drawn in a fixed order (`rnd`, `rnd_tile`): inside one
+expression, C lets each compiler pick its own order.
 

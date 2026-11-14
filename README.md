@@ -236,7 +236,7 @@ updates the *Latest build* pre-release. Pushing a `v*` tag publishes a release.
   from [`tools/cemu-headless-launch.patch`](tools/cemu-headless-launch.patch)),
   sends the game, maps and C libraries, plays a key script and saves screenshots.
   You need your own TI-84 Plus CE ROM dump (`CF_ROM=...`).
-- **Profiling**: `make CFLAGS="-Wall -Wextra -Oz -DCF_PERF"` builds a version that
+- **Profiling**: `make CFLAGS="-Wall -Wextra -Oz -fno-inline-functions -DCF_PERF"` builds a benchmark (see [Architecture](docs/ARCHITECTURE.md#profiling)) that
   shows, every 100 game ticks, the time spent in each part of the game and of
   the drawing at the bottom of the screen.
 

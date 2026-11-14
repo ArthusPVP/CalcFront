@@ -177,8 +177,8 @@ void conquer(tile_t t, uint8_t p)
             uint8_t o = nb & T_OWNER;
             if (o == p) continue;
             if (o) {
-                pl->nbrs |= BIT(o);
-                g_pl[o].nbrs |= BIT(p);
+                MASKSET(pl->nbrs, o);
+                MASKSET(g_pl[o].nbrs, p);
             } else
                 pl->nbrTN = 1;
         }
@@ -251,7 +251,7 @@ void scan_player(uint8_t p)
                         uint8_t o = nb & T_OWNER;
                         if (o == p) continue;
                         if (o)
-                            mask |= BIT(o);
+                            MASKSET(mask, o);
                         else
                             tn = 1;
                     }
@@ -275,7 +275,7 @@ tile_t random_land(void)
 {
     uint8_t tries = 200;
     while (tries--) {
-        tile_t t = TILE(rnd_n(g_W), rnd_n(g_H));
+        tile_t t = rnd_tile(0, g_W, 0, g_H);
         if (IS_LAND(g_map[t])) return t;
     }
     return NO_TILE;
@@ -646,9 +646,15 @@ static void coarse_bfs(tile_t from, tile_t to, uint8_t comp)
             if (!(sides & sideBit[a])) continue;
             nc = cell_next(c, a);
             kn = cSplit[nc];
-            if (!kn)
-                pools = 1; /* one pool there, and pool p crosses side a: they touch */
-            else if (!k) {
+            if (!kn) {
+                /* one pool there, and pool p crosses side a: they touch */
+                if (cDist[nc] == 255) {
+                    cDist[nc] = d < 254 ? (uint8_t)(d + 1) : 254;
+                    cPar[nc] = a ^ 1;
+                    q[qt++] = (uint16_t)(nc * 4);
+                }
+                continue;
+            } else if (!k) {
                 /* we are one pool: the neighbour's pools that cross back to us */
                 uint8_t q, back = sideBit[a ^ 1];
                 pools = 0;
