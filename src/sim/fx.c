@@ -75,8 +75,10 @@ typedef union {
     uint8_t b[4];
 } u32b_t;
 
-/* log2(x) in Q8; log2(0) = log2(1) = 0 */
-uint16_t fx_log2(uint32_t x)
+/* log2(x) in Q8; log2(0) = log2(1) = 0. On the calculator fx_log2, fx_exp2
+ * and fx_pow are hand-written assembly (src/asm/fx.s); these C versions serve
+ * the PC harness and check the assembly in profiling builds. */
+uint16_t fx_log2_c(uint32_t x)
 {
     u32b_t u;
     u16b_t w, r;
@@ -98,7 +100,7 @@ uint16_t fx_log2(uint32_t x)
 }
 
 /* 2^(l/256), l may be negative (result rounds to 0) */
-uint32_t fx_exp2(int16_t l)
+uint32_t fx_exp2_c(int16_t l)
 {
     u16b_t u;
     uint24_t m;
@@ -114,11 +116,16 @@ uint32_t fx_exp2(int16_t l)
     return m >> (15 - ip); /* one 24-bit shift instead of a 32-bit loop */
 }
 
-uint32_t fx_pow(uint32_t x, uint8_t p8)
+uint32_t fx_pow_c(uint32_t x, uint8_t p8)
 {
     if (x == 0) return 0;
-    return fx_exp2((int16_t)(((uint24_t)fx_log2(x) * p8) >> 8));
+    return fx_exp2_c((int16_t)(((uint24_t)fx_log2_c(x) * p8) >> 8));
 }
+#if defined(HOST) || defined(CF_NOASM)
+uint16_t fx_log2(uint32_t x) { return fx_log2_c(x); }
+uint32_t fx_exp2(int16_t l) { return fx_exp2_c(l); }
+uint32_t fx_pow(uint32_t x, uint8_t p8) { return fx_pow_c(x, p8); }
+#endif
 
 /* (x * k) >> 8 and >> 4 in 32 bits: one call instead of a multiply and a
  * shift call at every use */

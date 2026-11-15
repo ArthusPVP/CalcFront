@@ -1,0 +1,54 @@
+# The profiling benchmark (build with -DCF_PERF, see docs/ARCHITECTURE.md):
+# CF_MAPS="CFWORLD CFAFRICA" CF_PRG=<bench .8xp> tools/cemu_run.py <outdir> tools/bench.txt
+# New game: World, Large, Hard, 20 nations, 10 tribes (as the PC harness:
+# CF_HUMAN=1 CF_SIZE=1 ./host/cfhost world 2 20 10 2000 12648430)
+key enter 120
+run 350
+run 3000
+key down 120
+run 350
+key right 120
+run 350
+run 2500
+key down 120
+run 350
+key right 120
+run 350
+key down 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+key right 120
+run 350
+shot 1_setup
+key enter 120
+run 350
+run 12000
+# start-up timings
+shot 2_boot
+key enter 120
+run 350
+run 240000
+# totals, checksum and assembly self-test
+shot 3_report
+key enter 120
+run 350
+run 3000
+# finer timers and route statistics
+shot 4_detail

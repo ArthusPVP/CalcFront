@@ -70,9 +70,15 @@ needed → AI → diplomacy every 16 ticks → win check every 32 ticks.
 | `ce/hud.c` | Number formatting (troops shown /10 like OpenFront, percentages, times), the screen layout for normal and pro mode, the status bar, the info line and the action-key bar. Each part remembers what it shows and is redrawn only when that changes. |
 | `ce/ui.h` | Palette indices, screen layout, renderer and HUD declarations. |
 
-`src/asm/scan.s` is the one piece of hand-written eZ80: the loop that finds the
-next tile of a player along a row, used by every attack front scan (the C
-version in `attack.c` serves the PC harness).
+Hand-written eZ80, each with a C version for the PC harness (and for builds
+with `-DCF_NOASM`); the profiling build checks them against each other:
+
+- `src/asm/scan.s`: the loop that finds the next tile of a player along a row,
+  used by every attack front scan (C version in `attack.c`);
+- `src/asm/fx.s`: `fx_log2`, `fx_exp2` and `fx_pow` for troop growth and caps
+  (C versions in `fx.c`);
+- in `game.c`, the economy's 8-step division and MLT multiply, and in
+  `attack.c`, the terrain-type rotate: spots where clang emits library loops.
 
 **Code size and speed rules.** The build uses `-Oz -fno-inline-functions`:
 inlining big functions into their callers makes eZ80 code larger. Small helpers

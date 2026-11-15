@@ -10,6 +10,9 @@ Environment:
                  (default: cemu-headless from PATH)
   CE_CLIBS       folder with the CE C libraries (*.8xv), from
                  https://github.com/CE-Programming/libraries/releases/latest
+  CF_PRG         program to send (default bin/CALCFRNT.8xp); the AppVars a big
+                 build is split into (CALCFRNT.8xp.*.8xv) go along with it
+  CF_MAPS        map AppVars to send, e.g. "CFWORLD CFAFRICA" (default: all)
 
 script: one command per line, as understood by cemu-headless (run, key, keys...),
 plus "shot <name>" to save <outdir>/<name>.png. Lines starting with # are ignored.
@@ -34,9 +37,14 @@ os.makedirs(out, exist_ok=True)
 cmds = ["run 3000"]
 for f in sorted(glob.glob(os.path.join(CLIBS, "*.8xv"))):
     cmds.append(f"send-file archive {f}")
-for f in sorted(glob.glob(os.path.join(ROOT, "maps", "calc", "*.8xv"))):
+maps = os.environ.get("CF_MAPS")
+for f in ([os.path.join(ROOT, "maps", "calc", m + ".8xv") for m in maps.split()] if maps
+          else sorted(glob.glob(os.path.join(ROOT, "maps", "calc", "*.8xv")))):
     cmds.append(f"send-file archive {f}")
-cmds.append(f"send-file archive {os.path.join(ROOT, 'bin', 'CALCFRNT.8xp')}")
+prg = os.environ.get("CF_PRG") or os.path.join(ROOT, "bin", "CALCFRNT.8xp")
+for f in sorted(glob.glob(prg + ".*.8xv")):
+    cmds.append(f"send-file archive {f}")
+cmds.append(f"send-file archive {prg}")
 cmds += ["run 500", "launch CALCFRNT", "run 2500"]
 shots = []
 for line in open(sys.argv[2]):

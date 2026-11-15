@@ -338,6 +338,9 @@ extern clock_t g_prof[16], g_boot[6];
 uint16_t fx_log2(uint32_t x);            /* Q8 log2 */
 uint32_t fx_exp2(int16_t l);             /* 2^(l/256) */
 uint32_t fx_pow(uint32_t x, uint8_t p8); /* x^(p8/256) */
+uint16_t fx_log2_c(uint32_t x);          /* the C versions (see fx.c) */
+uint32_t fx_exp2_c(int16_t l);
+uint32_t fx_pow_c(uint32_t x, uint8_t p8);
 uint16_t rnd(void);
 uint16_t rnd_n(uint16_t n); /* 0..n-1 */
 tile_t rnd_tile(uint16_t x0, uint16_t w, uint16_t y0, uint16_t h);

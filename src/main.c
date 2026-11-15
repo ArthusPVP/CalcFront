@@ -232,6 +232,17 @@ static uint16_t asm_selftest(void)
         if (next_owned(buf + a, buf + b, o) != next_owned_c(buf + a, buf + b, o)) bad++;
         if (next_owned(buf + b, buf + a, o) != next_owned_c(buf + b, buf + a, o)) bad++;
     }
+    /* fixed-point helpers (src/asm/fx.s): every scale of x, every exponent */
+    for (k = 0; k < 3000; k++) {
+        uint32_t x = ((uint32_t)rnd() << (k % 31)) ^ rnd();
+        uint8_t p8 = (uint8_t)rnd();
+        int16_t l = (int16_t)((uint16_t)(k % 40) << 8 | (rnd() & 0xFF)); /* ranges 0..39 */
+        if (k < 300) x = k;
+        if ((k & 63) == 1) l = (int16_t)-l;
+        if (fx_log2(x) != fx_log2_c(x)) bad++;
+        if (fx_exp2(l) != fx_exp2_c(l)) bad++;
+        if (fx_pow(x, p8) != fx_pow_c(x, p8)) bad++;
+    }
     return bad;
 }
 

@@ -383,6 +383,8 @@ tile_t line_point(tile_t a, tile_t b, uint16_t k, uint16_t n)
 /* ------------------------------------------------------------ pathing --- */
 /* Paths are shared: ships sailing between the same two tiles reuse one
  * route, and finished routes stay cached until their slot is needed. */
+/* the tile search's heap spans hq and hk */
+typedef char hq_hk_follow[offsetof(sim_mem_t, hk) == offsetof(sim_mem_t, hq) + 2 * HEAPN ? 1 : -1];
 #define hq (g_mem->hq)
 #define hk (g_mem->hk)
 #define vlist (g_mem->vlist)
@@ -616,63 +618,43 @@ uint16_t path_guide_hash(void)
 }
 #endif
 
-/* pool of local tile i (ly * 8 + lx) of cell c */
-FORCE_INLINE uint8_t pool_at(uint16_t c, uint8_t i)
+/* bits 2k and 2k+1 of b, by masks and compares: a shift by more than one bit
+ * is a library loop on the eZ80 */
+FORCE_INLINE uint8_t pair_at(uint8_t b, uint8_t k)
 {
-    uint8_t k = cSplit[c], b;
-    if (!k) return 0;
-    b = splitLab[k - 1][i >> 2];
-    switch (i & 3) { /* constant shifts: a variable one is a library loop */
+    uint8_t m;
+    switch (k) {
     case 0: return b & 3;
-    case 1: return (b >> 2) & 3;
-    case 2: return (b >> 4) & 3;
-    default: return b >> 6;
+    case 1: m = b & 0x0C; return m == 0 ? 0 : m == 0x04 ? 1 : m == 0x08 ? 2 : 3;
+    case 2: m = b & 0x30; return m == 0 ? 0 : m == 0x10 ? 1 : m == 0x20 ? 2 : 3;
+    default: m = b & 0xC0; return m == 0 ? 0 : m == 0x40 ? 1 : m == 0x80 ? 2 : 3;
     }
 }
 
-FORCE_INLINE uint8_t node_dist(uint16_t c, uint8_t pool)
+/* pool of local tile (lx, ly) of cell c: 2 bits of byte ly * 2 + lx / 4
+ * (a call: split cells are the rare case) */
+static uint8_t pool_at(uint16_t c, uint8_t lx, uint8_t ly)
 {
     uint8_t k = cSplit[c];
-    return k ? splitDist[k - 1][pool] : cDist[c];
+    const uint8_t *m;
+    if (!k) return 0;
+    m = splitLab[k - 1] + ly + ly;
+    if (lx > 3) m++;
+    return pair_at(*m, lx & 3);
 }
 
-FORCE_INLINE uint8_t node_par(uint16_t c, uint8_t pool)
-{
-    uint8_t k = cSplit[c];
-    return k ? (splitPar[k - 1] >> (pool * 2)) & 3 : cPar[c];
-}
+static const uint8_t parMul[4] = {1, 4, 16, 64};          /* 1 << (pool * 2) */
+static const uint8_t parClr[4] = {0xFC, 0xF3, 0xCF, 0x3F}; /* ~(3 << (pool * 2)) */
 
 static void node_set(uint16_t c, uint8_t pool, uint8_t d, uint8_t side)
 {
     uint8_t k = cSplit[c];
     if (k) {
-        uint8_t sh = (uint8_t)(pool * 2);
         splitDist[k - 1][pool] = d;
-        splitPar[k - 1] = (uint8_t)((splitPar[k - 1] & ~(3 << sh)) | (side << sh));
+        splitPar[k - 1] = (uint8_t)((splitPar[k - 1] & parClr[pool]) | side * parMul[pool]);
     } else {
         cDist[c] = d;
         cPar[c] = side;
-    }
-}
-
-/* water body crossing side s of cell c (0 = none) */
-FORCE_INLINE uint8_t cell_cross(uint16_t c, uint8_t s)
-{
-    switch (s) {
-    case 0: return cCross[c] & 7;
-    case 1: return c ? cCross[c - 1] & 7 : 0; /* row starts: the previous cell is at the map edge */
-    case 2: return cCross[c] >> 4;
-    default: return c >= cW ? cCross[c - cW] >> 4 : 0;
-    }
-}
-
-FORCE_INLINE uint16_t cell_next(uint16_t c, uint8_t s)
-{
-    switch (s) {
-    case 0: return c + 1;
-    case 1: return c - 1;
-    case 2: return c + cW;
-    default: return c - cW;
     }
 }
 
@@ -689,25 +671,31 @@ FORCE_INLINE uint16_t cell_of(uint16_t x, uint16_t y) { return cRow[div8(y)] + d
 /* pools of cell nc (bit per pool) touching pool p of cell c across side a */
 static uint8_t border_pools(uint16_t c, uint8_t p, uint8_t a, uint16_t nc)
 {
-    uint8_t cy = (uint8_t)(c / cW), cx = (uint8_t)(c - (uint16_t)cy * cW), w, h, n, i, pools = 0;
-    uint16_t x0 = (uint16_t)cx * CS, y0 = (uint16_t)cy * CS;
+    uint8_t cy = (uint8_t)(c / cW), w, h, n, lx = 0, ly = 0, nlx, nly, pools = 0;
+    uint16_t x0 = (uint16_t)(c - cRow[cy]) * CS, y0 = (uint16_t)cy * CS;
+    const uint8_t *m;
+    int off = g_dirofs[a], step = a < 2 ? (int)g_W : 1;
     w = cell_size(x0, g_W);
     h = cell_size(y0, g_H);
     n = a < 2 ? h : w;
-    for (i = 0; i < n; i++) {
-        uint8_t lx, ly, nlx, nly, bu;
-        tile_t u;
-        switch (a) {
-        case 0: lx = (uint8_t)(w - 1); ly = i; nlx = 0; nly = i; break;
-        case 1: lx = 0; ly = i; nlx = 7; nly = i; break;
-        case 2: lx = i; ly = (uint8_t)(h - 1); nlx = i; nly = 0; break;
-        default: lx = i; ly = 0; nlx = i; nly = 7;
+    switch (a) {
+    case 0: lx = (uint8_t)(w - 1); break;
+    case 2: ly = (uint8_t)(h - 1); break;
+    }
+    /* the matching tile across the border: same row or column, other edge */
+    nlx = a == 0 ? 0 : a == 1 ? 7 : lx;
+    nly = a == 2 ? 0 : a == 3 ? 7 : ly;
+    for (m = g_map + TILE(x0 + lx, y0 + ly); n; n--, m += step) {
+        uint8_t bu = *m & (T_TERR | T_COMP);
+        if (bu && !(bu & T_TERR) && bu == (m[off] & (T_TERR | T_COMP)) && pool_at(c, lx, ly) == p)
+            pools |= sideBit[pool_at(nc, nlx, nly)];
+        if (a < 2) {
+            ly++;
+            nly++;
+        } else {
+            lx++;
+            nlx++;
         }
-        u = TILE(x0 + lx, y0 + ly);
-        bu = g_map[u] & (T_TERR | T_COMP);
-        if (!bu || (bu & T_TERR) || bu != (g_map[(tile_t)(u + g_dirofs[a])] & (T_TERR | T_COMP))) continue;
-        if (pool_at(c, (uint8_t)((ly << 3) | lx)) != p) continue;
-        pools |= sideBit[pool_at(nc, (uint8_t)((nly << 3) | nlx))];
     }
     return pools;
 }
@@ -715,143 +703,206 @@ static uint8_t border_pools(uint16_t c, uint8_t p, uint8_t a, uint16_t nc)
 /* number the cells from the goal outward, until a few layers past the start */
 static void coarse_bfs(tile_t from, tile_t to, uint8_t comp)
 {
-    uint16_t *q = hq; /* hq, hk and vlist follow each other: room for 3 * 2048 */
-    uint16_t qh = 0, qt = 0, gy = ty(to), gx = (uint16_t)(to - g_rowStart[gy]);
-    uint16_t sy = ty(from), sx = (uint16_t)(from - g_rowStart[sy]), sc = cell_of(sx, sy);
-    uint8_t stop = 255, sPool = pool_at(sc, (uint8_t)(((sy & 7) << 3) | (sx & 7)));
+    /* the queue: cells in hq, their pools in hk (hq, hk and vlist follow
+     * each other); each (cell, pool) is queued once, at most CMAX + 3 * NSPLIT */
+    uint16_t *q = hq;
+    uint8_t *qp = (uint8_t *)hk;
+    uint16_t qh = 0, qt = 1, gy = ty(to), gx = (uint16_t)(to - g_rowStart[gy]);
+    uint16_t sy = ty(from), sx = (uint16_t)(from - g_rowStart[sy]), sc = cell_of(sx, sy), step[4];
+    uint8_t stop = 255, sPool = pool_at(sc, (uint8_t)sx & 7, (uint8_t)sy & 7), comp4 = (uint8_t)(comp * 16);
     cGoal = cell_of(gx, gy);
-    gPool = pool_at(cGoal, (uint8_t)(((gy & 7) << 3) | (gx & 7)));
+    gPool = pool_at(cGoal, (uint8_t)gx & 7, (uint8_t)gy & 7);
+    step[0] = 1;
+    step[1] = 0xFFFF;
+    step[2] = cW;
+    step[3] = (uint16_t)-cW;
     memset(cDist, 255, cN);
     memset(splitDist, 255, (size_t)nSplit * 4);
     node_set(cGoal, gPool, 0, 0);
-    q[qt++] = (uint16_t)(cGoal * 4 + gPool);
+    q[0] = cGoal;
+    qp[0] = gPool;
 #ifdef PATH_STATS
     g_pathBfs++;
 #endif
     while (qh < qt) {
-        u16b_t st, cc;
-        uint16_t c;
-        uint8_t p, d, k, a, sides = 0;
-        st.v = q[qh++];
+        uint16_t c = q[qh];
+        uint8_t p = qp[qh], k = cSplit[c], d, nd, a, sides;
+        qh++;
 #ifdef PATH_STATS
         g_pathStates++;
 #endif
-        p = st.b[0] & 3;
-        cc.b[0] = (uint8_t)((st.b[0] >> 2) | (uint8_t)(st.b[1] << 6)); /* c = st >> 2 */
-        cc.b[1] = (uint8_t)(st.b[1] >> 2);
-        c = cc.v;
-        d = node_dist(c, p);
-        k = cSplit[c];
+        d = k ? splitDist[k - 1][p] : cDist[c];
         if (c == sc && p == sPool && stop == 255) stop = (uint8_t)(d > 250 ? 253 : d + 3);
         if (d >= stop) break;
+        nd = d < 254 ? (uint8_t)(d + 1) : 254;
         if (k)
             sides = splitSides[k - 1][p];
-        else
-            for (a = 0; a < 4; a++)
-                if (cell_cross(c, a) == comp) sides |= sideBit[a];
-        for (a = 0; a < 4; a++) {
+        else {
+            /* one pool: the sides where our sea crosses (bits 0-2 right,
+             * 4-6 bottom; the cell before a row start is at the map edge) */
+            uint8_t r = cCross[c];
+            sides = 0;
+            if ((r & 7) == comp) sides = 1;
+            if (c && (cCross[c - 1] & 7) == comp) sides |= 2;
+            if ((r & 0xF0) == comp4) sides |= 4;
+            if (c >= cW && (cCross[c - cW] & 0xF0) == comp4) sides |= 8;
+        }
+        for (a = 0; sides; a++, sides >>= 1) {
             uint16_t nc;
-            uint8_t pools, np, kn;
-            if (!(sides & sideBit[a])) continue;
-            nc = cell_next(c, a);
+            uint8_t pools, np, kn, par, *sd;
+            if (!(sides & 1)) continue;
+            nc = (uint16_t)(c + step[a]);
             kn = cSplit[nc];
             if (!kn) {
                 /* one pool there, and pool p crosses side a: they touch */
                 if (cDist[nc] == 255) {
-                    cDist[nc] = d < 254 ? (uint8_t)(d + 1) : 254;
+                    cDist[nc] = nd;
                     cPar[nc] = a ^ 1;
-                    q[qt++] = (uint16_t)(nc * 4);
+                    q[qt] = nc;
+                    qp[qt++] = 0;
                 }
                 continue;
-            } else if (!k) {
+            }
+            sd = splitDist[kn - 1];
+            if (!k) {
                 /* we are one pool: the neighbour's pools that cross back to us */
-                uint8_t q, back = sideBit[a ^ 1];
+                static const uint8_t backBit[4] = {2, 1, 8, 4}; /* sideBit[a ^ 1] */
+                uint8_t back = backBit[a];
                 pools = 0;
-                for (q = 0; q < 4; q++)
-                    if (splitSides[kn - 1][q] & back) pools |= sideBit[q];
+                if (splitSides[kn - 1][0] & back) pools = 1;
+                if (splitSides[kn - 1][1] & back) pools |= 2;
+                if (splitSides[kn - 1][2] & back) pools |= 4;
+                if (splitSides[kn - 1][3] & back) pools |= 8;
             } else
                 pools = border_pools(c, p, a, nc); /* split on both sides: look */
-            for (np = 0; np < 4; np++) {
-                if (!(pools & sideBit[np]) || node_dist(nc, np) != 255) continue;
-                node_set(nc, np, d < 254 ? (uint8_t)(d + 1) : 254, a ^ 1);
-                q[qt++] = (uint16_t)(nc * 4 + np);
+            par = splitPar[kn - 1];
+            for (np = 0; pools; np++, pools >>= 1) {
+                if (!(pools & 1) || sd[np] != 255) continue;
+                sd[np] = nd;
+                par = (uint8_t)((par & parClr[np]) | (a ^ 1) * parMul[np]);
+                q[qt] = nc;
+                qp[qt++] = np;
             }
+            splitPar[kn - 1] = par;
         }
     }
 }
 
-/* search key of tile (x, y): Manhattan distance to the goal, or with the
- * guide, 16 per cell left plus the distance to the cell side toward the goal */
-static uint16_t key_of(uint16_t x, uint16_t y, uint16_t gx, uint16_t gy)
+/* guided search key of the tile at (lx, ly) of a pool d cells from the goal's
+ * (side par toward it), m tiles from the goal: 16 per cell left plus the
+ * distance to the cell side toward the goal */
+FORCE_INLINE uint16_t cell_key(uint8_t d, uint8_t par, uint8_t lx, uint8_t ly, uint16_t m)
 {
-    uint16_t m = (uint16_t)((x > gx ? x - gx : gx - x) + (y > gy ? y - gy : gy - y));
-    if (cUse) {
-        uint16_t c = cell_of(x, y);
-        uint8_t lx = (uint8_t)x & 7, ly = (uint8_t)y & 7, pool = pool_at(c, (uint8_t)((ly << 3) | lx)), d, b;
-        if (c == cGoal && pool == gPool) return m;
-        d = node_dist(c, pool);
-        if (d == 255) return (uint16_t)(0xF000 | (m > 0xFFF ? 0xFFF : m));
-        switch (node_par(c, pool)) {
-        case 0: b = (uint8_t)(7 - lx); break;
-        case 1: b = lx; break;
-        case 2: b = (uint8_t)(7 - ly); break;
-        default: b = ly;
-        }
-        return (uint16_t)(d * 16 + b);
+    uint8_t b;
+    if (d == 255) return (uint16_t)(0xF000 | (m > 0xFFF ? 0xFFF : m));
+    switch (par) {
+    case 0: b = (uint8_t)(7 - lx); break;
+    case 1: b = lx; break;
+    case 2: b = (uint8_t)(7 - ly); break;
+    default: b = ly;
     }
-    return m;
+    return (uint16_t)(d * 16 + b);
 }
 
-/* (i - 1) / 2 for a heap index, with byte shifts */
-FORCE_INLINE uint16_t parent(uint16_t i)
+/* the same in cell c, split into pools (k = cSplit[c]) */
+static uint16_t split_key(uint16_t c, uint8_t k, uint8_t lx, uint8_t ly, uint16_t m)
 {
-    u16b_t u, r;
-    u.v = (uint16_t)(i - 1);
-    r.b[0] = (uint8_t)((u.b[0] >> 1) | (u.b[1] << 7));
-    r.b[1] = (uint8_t)(u.b[1] >> 1);
-    return r.v;
+    uint8_t pool = pool_at(c, lx, ly);
+    if (c == cGoal && pool == gPool) return m;
+    return cell_key(splitDist[k - 1][pool], pair_at(splitPar[k - 1], pool), lx, ly, m);
 }
 
-static void heap_push(tile_t t, uint16_t k)
+FORCE_INLINE uint16_t guide_key(uint16_t c, uint8_t lx, uint8_t ly, uint16_t m)
+{
+    uint8_t k = cSplit[c];
+    if (k) return split_key(c, k, lx, ly, m);
+    if (c == cGoal) return m; /* gPool is 0 there */
+    return cell_key(cDist[c], cPar[c], lx, ly, m);
+}
+
+/* The heap of the tile search: key and tile side by side, HEAPN entries over
+ * hq and hk (they follow each other). */
+typedef struct {
+    uint16_t k;
+    tile_t t;
+} hent_t;
+typedef char hent_size[sizeof(hent_t) == 4 ? 1 : -1];
+
+/* (i - 1) / 2 for a heap index (a 16-bit shift by one is inline code) */
+FORCE_INLINE uint16_t parent(uint16_t i) { return (uint16_t)(i - 1) >> 1; }
+
+FORCE_INLINE void heap_push(hent_t *h, tile_t t, uint16_t k)
 {
     uint16_t i = hn++;
+    hent_t *e = h + i;
     while (i) {
-        uint16_t p = parent(i);
-        if (hk[p] <= k) break;
-        hq[i] = hq[p];
-        hk[i] = hk[p];
-        i = p;
+        hent_t *pe;
+        i = parent(i);
+        pe = h + i;
+        if (pe->k <= k) break;
+        *e = *pe;
+        e = pe;
     }
-    hq[i] = t;
-    hk[i] = k;
+    e->k = k;
+    e->t = t;
 }
 
-static tile_t heap_pop(void)
+/* byte offsets (native 24-bit adds) in place of indexes: the children of
+ * the entry at offset o are at 2 * o + 4 and 2 * o + 8 */
+FORCE_INLINE tile_t heap_pop(hent_t *h)
 {
-    tile_t top = hq[0], t = hq[--hn];
-    uint16_t k = hk[hn], i = 0;
-    for (;;) {
-        uint16_t c = (uint16_t)(2 * i + 1);
-        if (c >= hn) break;
-        if (c + 1 < hn && hk[c + 1] < hk[c]) c++;
-        if (hk[c] >= k) break;
-        hq[i] = hq[c];
-        hk[i] = hk[c];
-        i = c;
+    uint8_t *b = (uint8_t *)h;
+    tile_t top = h[0].t;
+    unsigned end = (unsigned)--hn * sizeof(hent_t), o = 0, c;
+    hent_t last = *(hent_t *)(b + end);
+    while ((c = o + o + sizeof(hent_t)) < end) {
+        hent_t *ce = (hent_t *)(b + c);
+        if (c + sizeof(hent_t) < end && ce[1].k < ce[0].k) {
+            ce++;
+            c += sizeof(hent_t);
+        }
+        if (ce->k >= last.k) break;
+        *(hent_t *)(b + o) = *ce;
+        o = c;
     }
-    hq[i] = t;
-    hk[i] = k;
+    *(hent_t *)(b + o) = last;
     return top;
+}
+
+/* direction back to the parent, from a visited tile's scratch bits 3-4 */
+FORCE_INLINE uint8_t back_of(uint8_t b)
+{
+    b &= 3 << W_DIRSH;
+    return b == 0 ? 0 : b == 1 << W_DIRSH ? 1 : b == 2 << W_DIRSH ? 2 : 3;
+}
+
+/* box around the visited tiles vlist had no room for */
+static uint16_t farX0, farX1, farY0, farY1;
+
+static void note_far(tile_t t)
+{
+    uint16_t y = ty(t), x = (uint16_t)(t - g_rowStart[y]);
+    if (x < farX0) farX0 = x;
+    if (x > farX1) farX1 = x;
+    if (y < farY0) farY0 = y;
+    if (y > farY1) farY1 = y;
 }
 
 /* Greedy best-first search over one water body, expanding at most `budget`
  * tiles. Each visited tile remembers the direction back to its parent. The
- * map frame is water body 0, so the search never leaves the map. */
+ * map frame is water body 0, so the search never leaves the map. Keys are
+ * the Manhattan distance to the goal, or with the guide, guide_key(); the
+ * cell and the distance of a new tile follow from the expanded tile's. */
 static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
 {
-    uint16_t n = 0, gx, gy, x0 = 0xFFFF, x1 = 0, y0 = 0xFFFF, y1 = 0, x, y, k;
-    uint8_t comp = g_map[from] & T_COMP, i;
-    bool ok = false, overflow = false;
+    /* one step in direction i (as g_dirofs): local x and y in the cell, and
+     * the next cell when they leave it */
+    static const uint8_t stepX[4] = {1, 0xFF, 0, 0}, stepY[4] = {0, 0, 1, 0xFF};
+    static const uint8_t backBits[4] = {1 << W_DIRSH, 0, 3 << W_DIRSH, 2 << W_DIRSH};
+    hent_t *h = (hent_t *)hq;
+    uint16_t n = 0, gx, gy, x, y, k, pc = 0, cStep[4];
+    uint8_t comp = g_map[from] & T_COMP, i, plx = 0, ply = 0;
+    bool ok = false, overflow, guided = cUse;
     tile_t t;
 
     pathlen[slot] = 0;
@@ -859,13 +910,22 @@ static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
 
     gy = ty(to);
     gx = (uint16_t)(to - g_rowStart[gy]);
-    hn = vn = 0;
+    cStep[0] = 1;
+    cStep[1] = 0xFFFF;
+    cStep[2] = cW;
+    cStep[3] = (uint16_t)(0 - cW);
+    vn = 0;
+    farX0 = farY0 = 0xFFFF;
+    farX1 = farY1 = 0;
     g_map[from] |= W_VIS;
     vlist[vn++] = from;
-    heap_push(from, 0);
+    h[0].k = 0;
+    h[0].t = from;
+    hn = 1;
     while (hn) {
-        uint16_t px, py;
-        t = heap_pop();
+        uint16_t px, py, m;
+        uint8_t tw = 0; /* directions toward the goal (bit per direction) */
+        t = heap_pop(h);
         if (t == to) {
             ok = true;
             break;
@@ -876,58 +936,78 @@ static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
 #endif
         py = ty_in(t);
         px = (uint16_t)(t - g_rowStart[py]);
+        if (px < gx) tw = 1;
+        if (px > gx) tw = 2;
+        if (py < gy) tw |= 4;
+        if (py > gy) tw |= 8;
+        m = (uint16_t)((px > gx ? px - gx : gx - px) + (py > gy ? py - gy : gy - py));
+        if (guided) {
+            pc = cell_of(px, py);
+            plx = (uint8_t)px & 7;
+            ply = (uint8_t)py & 7;
+        }
         for (i = 0; i < 4; i++) {
-            static const uint8_t backBits[4] = {1 << W_DIRSH, 0, 3 << W_DIRSH, 2 << W_DIRSH};
             tile_t nt = (tile_t)(t + g_dirofs[i]);
-            uint8_t nb = g_map[nt];
+            uint8_t nb = g_map[nt], lx, ly;
+            uint16_t c, nm;
             if ((nb & (T_TERR | W_VIS)) || (nb & T_COMP) != comp) continue;
             if (hn >= HEAPN) break; /* heap full: leave it to another neighbour */
             g_map[nt] = (uint8_t)(nb | W_VIS | backBits[i]); /* direction back: i ^ 1 */
-            x = px;
-            y = py;
-            switch (i) {
-            case 0: x++; break;
-            case 1: x--; break;
-            case 2: y++; break;
-            default: y--;
-            }
             if (vn < VMAX)
                 vlist[vn++] = nt;
-            else {
-                overflow = true;
-                if (x < x0) x0 = x;
-                if (x > x1) x1 = x;
-                if (y < y0) y0 = y;
-                if (y > y1) y1 = y;
+            else
+                note_far(nt);
+            /* one step: one tile closer to or further from the goal */
+            nm = (uint16_t)(m + 1 - ((tw & sideBit[i]) ? 2 : 0));
+            if (guided) {
+                lx = (uint8_t)(plx + stepX[i]);
+                ly = (uint8_t)(ply + stepY[i]);
+                c = pc;
+                if ((uint8_t)(lx | ly) & 0xF8) { /* -1 or 8: into the next cell */
+                    c += cStep[i];
+                    lx &= 7;
+                    ly &= 7;
+                }
+                nm = guide_key(c, lx, ly, nm);
             }
-            heap_push(nt, key_of(x, y, gx, gy));
+            heap_push(h, nt, nm);
         }
     }
     if (ok) {
-        /* count the steps walking back from the goal, then store them forward */
-        for (t = to; t != from; n++) t = (tile_t)(t + g_dirofs[(g_map[t] >> W_DIRSH) & 3]);
-        memset(pathbuf[slot], 0, PATH_STEPS / 4);
+        /* count the steps walking back from the goal, then store them forward
+         * (step k in bits (k & 3) * 2 of byte k / 4) */
+        uint8_t *pb = pathbuf[slot], sub;
+        uint16_t bi;
+        for (t = to; t != from; n++) t = (tile_t)(t + g_dirofs[back_of(g_map[t])]);
+        memset(pb, 0, PATH_STEPS / 4);
+        bi = n >> 2;
+        sub = (uint8_t)n & 3;
         for (t = to, k = n; t != from;) {
-            uint8_t back = (g_map[t] >> W_DIRSH) & 3;
+            uint8_t back = back_of(g_map[t]);
             k--;
-            if (k < PATH_STEPS) pathbuf[slot][k >> 2] |= (uint8_t)((back ^ 1) << ((k & 3) * 2));
+            if (!sub--) {
+                sub = 3;
+                bi--;
+            }
+            if (k < PATH_STEPS) pb[bi] |= (uint8_t)((back ^ 1) * parMul[sub]);
             t = (tile_t)(t + g_dirofs[back]);
         }
         pathlen[slot] = n > PATH_STEPS ? PATH_STEPS : n;
     }
     /* clear scratch bits */
     for (k = 0; k < vn; k++) g_map[vlist[k]] &= T_COMP;
+    overflow = farX0 != 0xFFFF;
 #ifdef PATH_STATS
     if (overflow) g_pathOverflow++;
 #endif
     if (overflow)
-        for (y = y0;; y++) {
+        for (y = farY0;; y++) {
             uint8_t *row = g_map + g_rowStart[y];
-            for (x = x0;; x++) {
+            for (x = farX0;; x++) {
                 if (!IS_LAND(row[x])) row[x] &= T_COMP;
-                if (x == x1) break;
+                if (x == farX1) break;
             }
-            if (y == y1) break;
+            if (y == farY1) break;
         }
     return ok;
 }

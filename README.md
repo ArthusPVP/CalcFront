@@ -248,12 +248,15 @@ values are slow library loops. To reach OpenFront's 10 ticks per second:
 
 - the map lives in the unused half of video memory, one byte per tile;
 - tile coordinates, bitmaps, log2/exp2 use byte tables and byte moves, no shift loops;
+- the hottest helpers are hand-written eZ80 (front scan, log2/exp2/pow, the
+  troop-growth division), checked against their C versions;
 - ship routes are guided by a coarse map of 8×8-tile cells: a quick search
   over the cells counts how far each one is from the goal, and the tile search
   follows that count around continents instead of filling every bay (at most
   about 1,100 tiles looked at for any route, against up to 25,000 before);
   routes are shared through a cache;
-- per-tile attack costs are computed once per tick per terrain type;
+- per-tile attack costs are computed once per tick per terrain type, in 24-bit
+  arithmetic wherever the values fit;
 - unit loops only cover slots in use, and per-player unit counts are cached;
 - the screen is redrawn incrementally: only tiles that changed, sprites that
   moved, and sprites or buildings that a 16×16 dirty-cell grid says were painted

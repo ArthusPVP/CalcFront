@@ -7,15 +7,62 @@ attack_t g_at[MAX_ATTACKS];
 
 static const uint8_t terrMag[4] = {0, 80, 100, 120};
 static const uint8_t terrCost2[4] = {0, 33, 40, 50}; /* tileCost * 2 */
+static const uint8_t freeLoss[2][4] = {{0, 16, 20, 24}, {0, 8, 10, 12}}; /* terrMag / 5, / 10 */
 
-FORCE_INLINE uint8_t own_nbrs(tile_t t, uint8_t p)
+/* land of player o? (owner first: inside a territory that test fails at once) */
+#define LAND_OF(b, o) (((b) & T_OWNER) == (o) && IS_LAND(b))
+
+/* land neighbours of the land tile at m owned by p, as 0, 1 or 2 (2 or more;
+ * the callers need no more). The map frame is water, so the 4 neighbours
+ * exist; W = map width. Written as jumps: a counting version compiles to
+ * long branch-free select chains on the eZ80. */
+FORCE_INLINE uint8_t own_nbrs(const uint8_t *m, uint8_t p, int W)
 {
-    uint8_t i, n = 0;
-    for (i = 0; i < 4; i++) {
-        uint8_t b = g_map[(tile_t)(t + g_dirofs[i])];
-        if (IS_LAND(b) && (b & T_OWNER) == p) n++;
-    }
-    return n;
+    if (LAND_OF(m[1], p)) goto n1;
+    if (LAND_OF(m[-1], p)) goto n2;
+    if (LAND_OF(m[W], p)) goto n3;
+    return LAND_OF(m[-W], p) ? 1 : 0;
+n1:
+    if (LAND_OF(m[-1], p)) return 2;
+n2:
+    if (LAND_OF(m[W], p)) return 2;
+n3:
+    if (LAND_OF(m[-W], p)) return 2;
+    return 1;
+}
+
+/* bits 8-31 of a 32-bit value, read as 3 bytes: a 32-bit shift is a library
+ * call on the eZ80 */
+FORCE_INLINE uint24_t shr8_32(const uint32_t *v)
+{
+#ifdef HOST
+    return *v >> 8;
+#else
+    uint24_t r;
+    memcpy(&r, (const uint8_t *)v + 1, 3);
+    return r;
+#endif
+}
+#define FITS24(v) (((const uint8_t *)&(v))[3] == 0) /* little endian */
+
+/* b >> 5 (terrain | fallout << 2): clang turns every C spelling of it into
+ * a shift loop call on the eZ80, three rotates do it */
+FORCE_INLINE uint8_t top3(uint8_t b)
+{
+#if defined(HOST) || defined(CF_NOASM)
+    return b >> 5;
+#else
+    uint8_t k;
+    __asm__("rlca\n\trlca\n\trlca\n\tand\ta, 7" : "=a"(k) : "0"(b) : "cc");
+    return k;
+#endif
+}
+
+FORCE_INLINE uint8_t hi8(uint16_t v)
+{
+    u16b_t u;
+    u.v = v;
+    return u.b[1];
 }
 
 /* first tile from p to end (inclusive) that is land of player o, or 0. On
@@ -35,8 +82,8 @@ const uint8_t *next_owned_c(const uint8_t *p, const uint8_t *end, uint8_t o)
 const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o);
 #endif
 
-/* Sample the frontier (tiles of `def` touching `att`) into the ring.
- * With stopAtFirst it only answers "is there a border at all". */
+/* Sample the frontier (tiles of `def` touching `att`, att != def) into the
+ * ring. With stopAtFirst it only answers "is there a border at all". */
 static uint16_t scan_front(attack_t *a, uint8_t att, uint8_t def, bool stopAtFirst)
 {
     player_t *pl = &g_pl[att];
@@ -60,23 +107,21 @@ static uint16_t scan_front(attack_t *a, uint8_t att, uint8_t def, bool stopAtFir
     for (y = y0;; y++) {
         tile_t t0 = g_rowStart[y];
         const uint8_t *p = g_map + t0 + x0, *end = g_map + t0 + x1;
-        while ((p = next_owned(p, end, def))) {
+        p = next_owned(p, end, def);
+        while (p) {
             uint8_t nb;
             /* touches the attacker? (inline: this is the hottest loop) */
+            nb = p[-1];
+            if (LAND_OF(nb, att)) goto front;
+        inrun:
             nb = p[1];
-            if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) {
-                nb = p[-1];
-                if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) {
-                    nb = p[W];
-                    if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) {
-                        nb = p[-W];
-                        if (!(IS_LAND(nb) && (nb & T_OWNER) == att)) {
-                            p++;
-                            continue;
-                        }
-                    }
-                }
-            }
+            if (LAND_OF(nb, att)) goto front;
+            nb = p[W];
+            if (LAND_OF(nb, att)) goto front;
+            nb = p[-W];
+            if (LAND_OF(nb, att)) goto front;
+            goto next;
+        front:
             if (stopAtFirst) return 1;
             {
                 tile_t t = (tile_t)(p - g_map);
@@ -88,7 +133,16 @@ static uint16_t scan_front(attack_t *a, uint8_t att, uint8_t def, bool stopAtFir
                 }
             }
             n++;
+        next:
+            /* the defender's land comes in runs: follow one here instead of
+             * calling the scanner again for every tile. Inside a run the
+             * tile on the left is the defender's, never the attacker's
+             * (att != def for every caller), so its test is skipped. */
+            if (p == end) break;
             p++;
+            nb = *p;
+            if (LAND_OF(nb, def)) goto inrun;
+            p = next_owned(p + 1, end, def);
         }
         if (y == y1) break;
     }
@@ -246,19 +300,87 @@ static void annex_all(uint8_t att, uint8_t def)
     }
 }
 
+/* Per-attack values that do not change within a tick, and the tile cost and
+ * loss cache: they depend only on terrain, fallout and a nearby defense post
+ * within a tick, so each combination (key) is computed once. On free land
+ * the cost also depends on the attack's size, but only below 40000 troops.
+ * Static rather than on the stack: run_attack's frame then stays small
+ * enough for short IX offsets, which the eZ80 code uses everywhere. */
+static struct {
+    uint32_t sc8;
+    uint16_t lossRatio, term, bAs, bD;
+} K;
+static uint16_t cCost[16]; /* capped at BUDGET_MAX, see tile_cost() */
+static uint32_t cLoss[16];
+static uint8_t have[16];
+
+/* fill cache entry `key` (terrain | fallout << 2 | defense post << 3) */
+static __attribute__((noinline)) void tile_cost(const attack_t *a, uint8_t key)
+{
+    const player_t *ap = &g_pl[a->att], *dp = &g_pl[a->def];
+    uint8_t terr = key & 3;
+    uint16_t mag = terrMag[terr];
+    uint24_t tc2 = terrCost2[terr], cost;
+    uint32_t loss;
+    if (key & 4) {
+        mag *= 4;
+        tc2 *= 4;
+    }
+    if (!a->def) {
+        /* w = 1000 * tc2 / (troops + 1) clamped to 5..100. 1000 * tc2 <=
+         * 200000, so from 200000 troops on the quotient is 0; below, divide
+         * (24 bits) only when the clamps do not settle it */
+        uint24_t w = 5;
+        if (a->troops < 200000) {
+            uint24_t x = 1000u * tc2, d = (uint24_t)a->troops + 1;
+            if (x >= 6 * d) {
+                w = x / d;
+                if (w > 100) w = 100;
+            }
+        }
+        cost = w * 2 * g_L16;
+        {
+            /* mag / 5 (tribes: / 10): exact, terrMag is a multiple of 10 */
+            uint8_t v = freeLoss[ap->type == PT_TRIBE][terr];
+            if (key & 4) v *= 4;
+            loss = (uint16_t)(v * g_S); /* <= 96 * 255 */
+        }
+    } else {
+        uint32_t tmp, c;
+        if (key & 8) {
+            mag *= 5;
+            tc2 *= 3;
+        }
+        if (dp->type == PT_TRIBE && ap->type != PT_TRIBE) mag = (mag * 179) >> 8;
+        tmp = mulq8(mag, K.lossRatio);
+        loss = mulq8(tmp, K.term);
+        c = mulq4(K.sc8, (uint16_t)tc2);
+        c = mulq4(c, g_L16);
+        c = mulq8(c, 60);
+        /* a Q8 factor of 256 (no large-territory malus) changes nothing */
+        if (K.bAs != 256) c = mulq8(c, K.bAs);
+        if (K.bD != 256) c = mulq8(c, K.bD);
+        if (dp->traitor) {
+            loss >>= 1;
+            c = mulq8(c, 205);
+        }
+        if (c < 16) c = 16;
+        /* the budget never exceeds BUDGET_MAX, and a full budget buys any
+         * tile: a dearer tile acts exactly like one costing BUDGET_MAX */
+        cost = c > BUDGET_MAX ? BUDGET_MAX : (uint24_t)c;
+    }
+    cCost[key] = (uint16_t)cost;
+    cLoss[key] = loss;
+    have[key] = 1;
+}
+
 static void run_attack(attack_t *a)
 {
     uint8_t att = a->att, def = a->def, pops = 0, taken = 0;
     player_t *ap = &g_pl[att], *dp = &g_pl[def];
     uint24_t B;
-    /* per-attack values that do not change within a tick */
-    uint16_t r8 = 0, lossRatio = 256, term = 0, bA = 256, bD = 256, bAs = 256;
-    uint32_t dloss = 0, sc8 = 0;
-    /* tile cost and loss depend only on terrain, fallout and a nearby defense
-     * post within a tick: compute each combination once. On free land the
-     * cost also depends on the attack's size, but only below 40000 troops. */
-    uint32_t cCost[16], cLoss[16];
-    uint8_t have[16];
+    uint32_t dloss = 0;
+    int W = (int)g_W;
     bool cacheOk;
 
     if (!ap->alive) {
@@ -291,85 +413,64 @@ static void run_attack(attack_t *a)
 
     if (def) {
         uint32_t dt = dp->troops, q;
-        uint16_t a8, b8;
-        q = dt / ((a->troops >> 8) + 1); /* ~ ratio * 256 */
+        uint24_t d = shr8_32(&a->troops) + 1; /* (troops >> 8) + 1 fits in 24 bits */
+        uint16_t r8, a8, b8, bA, tiles = dp->tiles ? dp->tiles : 1;
+        uint8_t f;
+        /* 24-bit divisions whenever the defender's troops fit (as a rule) */
+        if (FITS24(dt)) {
+            q = (uint24_t)dt / d; /* ~ ratio * 256 */
+            dloss = (uint24_t)dt / tiles;
+        } else {
+            q = dt / d;
+            dloss = dt / tiles;
+        }
         r8 = q > 60000 ? 60000 : (uint16_t)q;
-        lossRatio = r8 < 154 ? 154 : (r8 > 512 ? 512 : r8);
-        bA = 256 - ((179 * ap->big8) >> 8);
-        bD = 256 - ((77 * dp->big8) >> 8);
-        bAs = 256 - ((187 * ap->big8) >> 8);
-        dloss = dt / (dp->tiles ? dp->tiles : 1);
-        term = (uint16_t)((((119u * bA) >> 8) * bD >> 8) * g_S + (dloss > 20000 ? 20000 : dloss));
+        K.lossRatio = r8 < 154 ? 154 : (r8 > 512 ? 512 : r8);
+        /* large-territory factors (256 = none, the usual case) */
+        bA = K.bAs = K.bD = 256;
+        if (ap->big8) {
+            bA = 256 - hi8((uint16_t)(179 * ap->big8));
+            K.bAs = 256 - hi8((uint16_t)(187 * ap->big8));
+        }
+        if (dp->big8) K.bD = 256 - hi8((uint16_t)(77 * dp->big8));
+        /* (119 * bA >> 8) * bD >> 8; bA, bD <= 256: the products fit in 16
+         * bits, and with both at 256 it is 119 */
+        f = 119;
+        if (bA != 256 || K.bD != 256) f = hi8((uint16_t)(hi8((uint16_t)(119u * bA)) * K.bD));
+        K.term = (uint16_t)(f * g_S + (dloss > 20000 ? 20000 : (uint16_t)dloss));
         a8 = r8 < 210 ? 210 : (r8 > 1920 ? 1920 : r8);
-        b8 = r8 / 20;
-        b8 = b8 < 256 ? 256 : (b8 > 12800 ? 12800 : b8);
-        sc8 = mulq8(a8, b8);
+        /* r8 / 20 clamped to 256..12800; r8 <= 60000 never reaches 12800 */
+        b8 = r8 < 5120 ? 256 : r8 / 20;
+        K.sc8 = b8 == 256 ? a8 : mulq8(a8, b8);
     }
     memset(have, 0, sizeof have);
     cacheOk = def || a->troops >= 40000;
 
     while (taken < 24 && pops < 48 && a->count) {
         tile_t t = a->ring[a->head];
-        uint8_t b = g_map[t], own, terr, i, key;
-        uint16_t mag;
-        uint24_t tc2;
-        uint32_t cost, loss;
+        const uint8_t *m = g_map + t;
+        uint8_t b = *m, own, key, h;
+        uint24_t cost;
+        uint32_t loss, tr;
         pops++;
-        if (!IS_LAND(b) || (b & T_OWNER) != def || !(own = own_nbrs(t, att))) {
-            a->head = (a->head + 1) & (RING - 1);
+        if (!LAND_OF(b, def) || !(own = own_nbrs(m, att, W))) {
+            a->head = (uint8_t)(a->head + 1) & (RING - 1);
             a->count--;
             continue;
         }
-        terr = (b >> 5) & 3;
-        if (own == 1 && a->count > 3 && rnd_n(terr + 1)) {
+        key = top3(b);
+        if (own == 1 && a->count > 3 && rnd_n((key & 3) + 1)) {
             /* exposed tile: try another one first to keep the front smooth */
-            a->head = (a->head + 1) & (RING - 1);
-            a->ring[(a->head + a->count - 1) & (RING - 1)] = t;
+            h = (uint8_t)(a->head + 1) & (RING - 1);
+            a->head = h;
+            h = (uint8_t)(h + a->count - 1) & (RING - 1);
+            a->ring[h] = t;
             continue;
         }
-        key = (uint8_t)(terr | ((b & T_FALL) ? 4 : 0));
         if (def && dp->nPost && post_near(def, t)) key |= 8;
-        if (have[key] && cacheOk) {
-            cost = cCost[key];
-            loss = cLoss[key];
-            goto take;
-        }
-        mag = terrMag[terr];
-        tc2 = terrCost2[terr];
-        if (b & T_FALL) {
-            mag *= 4;
-            tc2 *= 4;
-        }
-        if (!def) {
-            uint32_t w = (1000UL * tc2) / (a->troops + 1);
-            if (w < 5) w = 5;
-            if (w > 100) w = 100;
-            cost = w * 2 * g_L16;
-            loss = (uint32_t)(mag / (ap->type == PT_TRIBE ? 10 : 5)) * g_S;
-        } else {
-            uint32_t tmp;
-            if (key & 8) {
-                mag *= 5;
-                tc2 *= 3;
-            }
-            if (dp->type == PT_TRIBE && ap->type != PT_TRIBE) mag = (mag * 179) >> 8;
-            tmp = mulq8(mag, lossRatio);
-            loss = mulq8(tmp, term);
-            cost = mulq4(sc8, (uint16_t)tc2);
-            cost = mulq4(cost, g_L16);
-            cost = mulq8(cost, 60);
-            cost = mulq8(cost, bAs);
-            cost = mulq8(cost, bD);
-            if (dp->traitor) {
-                loss >>= 1;
-                cost = mulq8(cost, 205);
-            }
-            if (cost < 16) cost = 16;
-        }
-        cCost[key] = cost;
-        cLoss[key] = loss;
-        have[key] = 1;
-    take:
+        if (!have[key] || !cacheOk) tile_cost(a, key);
+        cost = cCost[key];
+        loss = cLoss[key];
         if (a->budget < cost) {
             /* a full budget always buys the tile: OpenFront takes at least
              * one tile per tick, so even a hopeless push moves (and dies)
@@ -377,26 +478,40 @@ static void run_attack(attack_t *a)
             if (a->budget < BUDGET_MAX) break;
             cost = a->budget;
         }
-        a->budget -= (uint24_t)cost;
-        a->head = (a->head + 1) & (RING - 1);
+        a->budget -= cost;
+        a->head = (uint8_t)(a->head + 1) & (RING - 1);
         a->count--;
         taken++;
-        if (def) sub_troops(def, dloss);
+        if (def) { /* sub_troops(def, dloss), inline */
+            uint32_t dt = dp->troops;
+            dp->troops = dt > dloss ? dt - dloss : 0;
+        }
         PROF(1, conquer(t, att));
         if (!a->active) return; /* defender died: troops already refunded */
-        for (i = 0; i < 4 && a->count < RING; i++) {
-            tile_t n = (tile_t)(t + g_dirofs[i]);
-            uint8_t nb = g_map[n];
-            if (IS_LAND(nb) && (nb & T_OWNER) == def) {
-                a->ring[(a->head + a->count) & (RING - 1)] = n;
-                a->count++;
-            }
+        {
+            /* queue the defender's neighbours (+1, -1, +W, -W, as in
+             * g_dirofs) while the ring has room */
+            uint8_t c = a->count;
+            h = a->head;
+#define PUSH(ofs)                                                  \
+    if (c < RING && LAND_OF(m[ofs], def)) {                        \
+        uint8_t j = (uint8_t)(h + c) & (RING - 1);                 \
+        a->ring[j] = (tile_t)(t + (ofs));                          \
+        c++;                                                       \
+    }
+            PUSH(1)
+            PUSH(-1)
+            PUSH(W)
+            PUSH(-W)
+#undef PUSH
+            a->count = c;
         }
-        if (loss >= a->troops) {
+        tr = a->troops;
+        if (loss >= tr) {
             a->active = 0;
             return;
         }
-        a->troops -= loss;
+        a->troops = tr - loss;
         if (def) {
             if (!dp->alive) {
                 end_attack(a, 0);
