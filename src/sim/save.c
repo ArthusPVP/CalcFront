@@ -2,7 +2,8 @@
  *
  * The front end writes its own header (map file name, view), then this
  * stream: magic, core values, players, active attacks (without their sample
- * of front tiles, rescanned on the next tick), units, the owner and fallout
+ * of front tiles, rescanned on the next tick, except for a landed boat's
+ * attack, which only grows from its own front), units, the owner and fallout
  * of every land tile (run-length coded), and the magic again. Water and
  * terrain come from the map file. Rebuilt on load: the structure bitmap,
  * railways, ship routes and the per-tick caches. */
@@ -80,7 +81,9 @@ bool game_save(void)
     for (i = 1; i <= g_nplayers; i++)
         if (!plat_save_write(&g_pl[i], PLAYER_BYTES)) return false;
     for (i = 0; i < MAX_ATTACKS; i++)
-        if (g_at[i].active && (!plat_save_write(&i, 1) || !plat_save_write(&g_at[i], ATK_LEN)))
+        if (g_at[i].active && (!plat_save_write(&i, 1) || !plat_save_write(&g_at[i], ATK_LEN) ||
+                               /* a boat's attack keeps its own front */
+                               (g_at[i].active == 2 && !plat_save_write(g_at[i].ring, sizeof g_at[i].ring))))
             return false;
     for (i = 0; i < g_unHi; i++)
         if (!plat_save_write(&g_un[i], UNIT_BYTES)) return false;
@@ -150,6 +153,10 @@ bool game_load(uint8_t mapIdx)
     for (i = 0; i < c.nAtk; i++) {
         uint8_t k;
         if (!plat_save_read(&k, 1) || k >= MAX_ATTACKS || !plat_save_read(&g_at[k], ATK_LEN)) return false;
+        if (g_at[k].active == 2) { /* a boat's attack: its own front was saved */
+            if (!plat_save_read(g_at[k].ring, sizeof g_at[k].ring)) return false;
+            continue;
+        }
         g_at[k].head = g_at[k].count = 0; /* rescan the front on the next tick */
         g_at[k].rescan = 1;
     }

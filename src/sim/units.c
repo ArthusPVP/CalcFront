@@ -20,8 +20,9 @@ void nuke_radius(uint8_t type, uint8_t *inner, uint8_t *outer)
         *inner = orig2tiles(80);
         *outer = orig2tiles(100);
     } else if (type == U_MIRV) {
-        *inner = orig2tiles(12);
-        *outer = orig2tiles(18);
+        /* each warhead covers 10 times OpenFront's area (radius x 3.16) */
+        *inner = orig2tiles(38);
+        *outer = orig2tiles(57);
     } else {
         *inner = orig2tiles(12);
         *outer = orig2tiles(30);
@@ -374,36 +375,54 @@ static unit_t *sam_cover(tile_t pos, uint8_t by, uint8_t victim)
     return 0;
 }
 
+/* A MIRV that has landed keeps falling as warheads over the victim's land,
+ * one per tick (level = warheads left, dist = random tries left): 28 big
+ * blasts at once would stall the game for seconds. */
+static void mirv_warhead(unit_t *u)
+{
+    uint8_t rin, rout, victim = u->aux;
+    player_t *v = &g_pl[victim];
+    nuke_radius(U_MIRV, &rin, &rout);
+    while (u->level && u->dist) {
+        tile_t t;
+        unit_t *s;
+        u->dist--;
+        if (!victim || !v->alive) break;
+        t = rnd_tile(v->minx, (uint16_t)(v->maxx - v->minx + 1), v->miny,
+                     (uint16_t)(v->maxy - v->miny + 1));
+        if (!IS_LAND(g_map[t]) || OWNER_OF(t) != victim) continue;
+        u->level--;
+        u->pos = t;
+        s = sam_cover(t, u->owner, victim);
+        if (s && (rnd() & 1)) {
+            s->timer = 20;
+            return;
+        }
+        blast(t, rin, rout, u->owner);
+        return;
+    }
+    u->type = U_NONE; /* no warheads or no target left */
+}
+
 static void nuke_tick(unit_t *u)
 {
     uint8_t rin, rout;
+    if (u->timer >= u->timer2) {
+        mirv_warhead(u);
+        return;
+    }
     u->timer++;
     if (u->timer >= u->timer2) {
         tile_t c = u->dst;
-        uint8_t by = u->owner, type = u->type, victim = u->aux;
-        u->type = U_NONE;
+        uint8_t by = u->owner, type = u->type;
         nuke_radius(type, &rin, &rout);
         if (type == U_MIRV) {
-            uint8_t n = 28, tries = 200;
-            player_t *v = &g_pl[victim];
-            blast(c, rin, rout, by);
-            while (n && tries--) {
-                tile_t t;
-                unit_t *s;
-                if (!victim || !v->alive) break;
-                t = rnd_tile(v->minx, (uint16_t)(v->maxx - v->minx + 1), v->miny,
-                             (uint16_t)(v->maxy - v->miny + 1));
-                if (!IS_LAND(g_map[t]) || OWNER_OF(t) != victim) continue;
-                n--;
-                s = sam_cover(t, by, victim);
-                if (s && (rnd() & 1)) {
-                    s->timer = 20;
-                    continue;
-                }
-                blast(t, rin, rout, by);
-            }
+            u->pos = c;
+            u->level = 28;
+            u->dist = 200;
         } else
-            blast(c, rin, rout, by);
+            u->type = U_NONE;
+        blast(c, rin, rout, by);
         return;
     }
     u->pos = line_point(u->src, u->dst, u->timer, u->timer2);

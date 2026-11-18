@@ -98,40 +98,67 @@ static bool ship_greedy(unit_t *u, tile_t goal)
  * water bodies in `seas` (bit c = water body c). Walks square rings outward
  * and stops as soon as no farther ring can hold a closer tile. */
 #define LAND_R 20
-static tile_t landing_near(tile_t target, uint8_t seas, uint8_t *comp)
+static tile_t lBest;
+static unsigned lBd;
+static int lCx, lCy;
+static uint8_t lOwn, lSeas, lComp;
+
+/* consider (x, y) as a landing: land of the target's owner beside one of
+ * our seas, closer to the target than the best so far */
+static void landing_try(int x, int y)
 {
     static const uint8_t bit8[8] = {1, 2, 4, 8, 16, 32, 64, 128};
-    uint8_t own = OWNER_OF(target), r, k;
-    int16_t x, y, cx = (int16_t)tx(target), cy = (int16_t)ty(target);
-    tile_t best = NO_TILE;
-    uint16_t bd = 0xFFFF;
-    for (r = 0; r <= LAND_R; r++) {
-        for (y = cy - r; y <= cy + r; y++) {
-            int16_t step = (y == cy - r || y == cy + r || !r) ? 1 : 2 * r; /* ring only */
-            if (y < 1 || y >= (int16_t)g_H - 1) continue;
-            for (x = cx - r; x <= cx + r; x += step) {
-                tile_t t;
-                uint8_t c = 0;
-                uint16_t d;
-                if (x < 1 || x >= (int16_t)g_W - 1) continue;
-                t = TILE(x, y);
-                if (!IS_LAND(g_map[t]) || OWNER_OF(t) != own) continue;
-                for (k = 0; k < 4 && !c; k++) {
-                    uint8_t nb = g_map[(tile_t)(t + g_dirofs[k])];
-                    if (!IS_LAND(nb) && (nb & T_COMP) && (seas & bit8[nb & T_COMP])) c = nb & T_COMP;
-                }
-                if (!c) continue;
-                d = (uint16_t)((x - cx) * (x - cx) + (y - cy) * (y - cy));
-                if (d < bd) {
-                    bd = d;
-                    best = t;
-                    *comp = c;
-                }
-            }
+    tile_t t;
+    unsigned d;
+    uint8_t k;
+    if (x < 1 || y < 1 || x >= (int)g_W - 1 || y >= (int)g_H - 1) return;
+    t = TILE(x, y);
+    if (!IS_LAND(g_map[t]) || OWNER_OF(t) != lOwn) return;
+    d = (unsigned)((x - lCx) * (x - lCx) + (y - lCy) * (y - lCy)); /* < 2^18 */
+    if (d >= lBd) return;
+    for (k = 0; k < 4; k++) {
+        uint8_t nb = g_map[(tile_t)(t + g_dirofs[k])];
+        if (!IS_LAND(nb) && (nb & T_COMP) && (lSeas & bit8[nb & T_COMP])) {
+            lBd = d;
+            lBest = t;
+            lComp = nb & T_COMP;
+            return;
         }
-        if (best != NO_TILE && bd <= (uint16_t)(r + 1) * (r + 1)) break;
     }
-    return best;
+}
+
+/* The target owner's coast closest to `target`, next to one of the water
+ * bodies in `seas` (bit c = water body c). Walks square rings outward and
+ * stops as soon as no farther ring can hold a closer tile; aimed deep inland,
+ * it looks at the owner's whole land (OpenFront has no distance limit), rows
+ * nearest the target first so most are skipped. */
+static tile_t landing_near(tile_t target, uint8_t seas, uint8_t *comp)
+{
+    int r, x, y;
+    lOwn = OWNER_OF(target);
+    lSeas = seas;
+    lCx = (int)tx(target);
+    lCy = (int)ty(target);
+    lBest = NO_TILE;
+    lBd = (unsigned)-1;
+    for (r = 0; r <= LAND_R; r++) {
+        for (y = lCy - r; y <= lCy + r; y++) {
+            int step = (y == lCy - r || y == lCy + r || !r) ? 1 : 2 * r; /* ring only */
+            for (x = lCx - r; x <= lCx + r; x += step) landing_try(x, y);
+        }
+        if (lBest != NO_TILE && lBd <= (unsigned)((r + 1) * (r + 1))) break;
+    }
+    if (lBest == NO_TILE && lOwn) {
+        const player_t *o = &g_pl[lOwn];
+        int dy, maxdy = o->maxy - o->miny;
+        for (dy = 0; dy <= maxdy && (unsigned)(dy * dy) < lBd; dy++)
+            for (x = o->minx; x <= o->maxx; x++) {
+                landing_try(x, lCy - dy);
+                if (dy) landing_try(x, lCy + dy);
+            }
+    }
+    *comp = lComp;
+    return lBest;
 }
 
 bool launch_boat(uint8_t p, tile_t target, uint32_t troops)
@@ -156,7 +183,13 @@ bool launch_boat(uint8_t p, tile_t target, uint32_t troops)
      * may face a sea we cannot reach */
     seas = coast_bodies(p);
     land = seas ? landing_near(target, seas, &comp) : NO_TILE;
-    src = land == NO_TILE ? NO_TILE : nearest_own_shore(p, land, comp);
+    /* leave from our coast closest to the landing by sea */
+    src = NO_TILE;
+    w0 = w1 = NO_TILE;
+    if (land != NO_TILE) {
+        w1 = water_next_to(land, comp);
+        src = own_shore_by_sea(p, w1, &w0);
+    }
 #ifdef HOST
     g_boatTry++;
     if (src == NO_TILE) g_boatFail++;
@@ -165,8 +198,6 @@ bool launch_boat(uint8_t p, tile_t target, uint32_t troops)
         if (p == HUMAN) ui_event(EV_NOROUTE, 0, 0);
         return false;
     }
-    w0 = water_next_to(src, comp);
-    w1 = water_next_to(land, comp);
     slot = path_find(w0, w1);
     if (slot == 0xFF) {
         if (p == HUMAN) ui_event(EV_NOROUTE, 0, 0);
@@ -212,7 +243,7 @@ void boat_tick(unit_t *u)
     conquer(land, p);
     if (!g_pl[p].alive) return;
     if (o && !g_pl[o].alive) o = 0;
-    if (!attack_start(p, o, troops, false)) add_troops(p, troops);
+    if (!attack_start_at(p, o, troops, land)) add_troops(p, troops);
 }
 
 /* -------------------------------------------------------------- trade --- */

@@ -1012,6 +1012,71 @@ static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
     return ok;
 }
 
+/* The coast of p closest BY SEA to water tile `from`, as OpenFront picks a
+ * boat's departure: the closest coast in a straight line can be across a
+ * peninsula, a long way round by sea. The coarse guide numbers the 8x8 cells
+ * by sea distance from `from` (out to a little past the straight-line
+ * choice), then the coast whose sea tile has the fewest cells to go wins,
+ * ties going to the one nearer in a straight line. One guide pass and one
+ * scan of p's box: cheap at any ocean size. Returns the land tile and sets
+ * *water to the sea tile beside it; NO_TILE if p has no coast on that sea. */
+/* cells to sail from sea tile (x, y), as the last coarse_bfs numbered them */
+static uint8_t sea_cells(uint16_t x, uint16_t y)
+{
+    uint16_t c = cell_of(x, y);
+    uint8_t k = cSplit[c];
+    return k ? splitDist[k - 1][pool_at(c, (uint8_t)x & 7, (uint8_t)y & 7)] : cDist[c];
+}
+
+tile_t own_shore_by_sea(uint8_t p, tile_t from, tile_t *water)
+{
+    static const int8_t ddx[4] = {1, -1, 0, 0}, ddy[4] = {0, 0, 1, -1};
+    const player_t *pl = &g_pl[p];
+    uint8_t comp = g_map[from] & T_COMP, bestD = 255;
+    uint16_t x, y, fy, fx, bestM = 0xFFFF;
+    tile_t best = NO_TILE, near;
+    if (IS_LAND(g_map[from]) || !comp || !pl->tiles) return NO_TILE;
+    near = nearest_own_shore(p, from, comp);
+    if (near == NO_TILE) return NO_TILE;
+    *water = water_next_to(near, comp);
+    path_ready();
+    if (!cOn) return near;
+    coarse_bfs(*water, from, comp);
+    fy = ty(from);
+    fx = (uint16_t)(from - g_rowStart[fy]);
+    for (y = pl->miny;; y++) {
+        const uint8_t *row = g_map + g_rowStart[y];
+        for (x = pl->minx;; x++) {
+            const uint8_t *q = row + x;
+            if (IS_LAND(*q) && (*q & T_OWNER) == p) {
+                uint8_t i;
+                for (i = 0; i < 4; i++) {
+                    uint16_t wx, wy, m;
+                    uint8_t d;
+                    if ((q[g_dirofs[i]] & (T_TERR | T_COMP)) != comp) continue;
+                    wx = (uint16_t)(x + ddx[i]);
+                    wy = (uint16_t)(y + ddy[i]);
+                    d = sea_cells(wx, wy);
+                    if (d > bestD) continue;
+                    m = (uint16_t)((wx > fx ? wx - fx : fx - wx) + (wy > fy ? wy - fy : fy - wy));
+                    if (d == bestD && m >= bestM) continue;
+                    bestD = d;
+                    bestM = m;
+                    best = (tile_t)(q - g_map);
+                    *water = (tile_t)(best + g_dirofs[i]);
+                }
+            }
+            if (x == pl->maxx) break;
+        }
+        if (y == pl->maxy) break;
+    }
+    if (best == NO_TILE || bestD == 255) {
+        *water = water_next_to(near, comp);
+        return near;
+    }
+    return best;
+}
+
 /* a short hop is tried with the plain search and a small budget first; long
  * routes, or hops around a headland, use the coarse guide */
 #define SHORT_HOP 40

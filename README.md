@@ -39,14 +39,18 @@ alliances (and break them), and launch nukes, against up to 30 computer players.
     troops out attacking (orange), cap, gold and land share;
   - attacks with an adjustable troop ratio, terrain costs (plains, highland,
     mountain), defense posts, fallout, traitor penalties, big-empire bonuses;
-  - transport **boats** to attack across the sea;
+  - transport **boats** to attack across the sea: they land on the target's
+    coast nearest to where you aim, leave from your coast nearest by sea, and
+    their attack only spreads from where they landed;
   - **ports** with levels that send **trade ships** to other ports (gold for both
     sides, more for long routes, bonus for allies);
   - **factories** that link nearby cities, ports and factories with **railways**,
     and **trains** that earn gold at every stop;
   - **warships** with health, shells, repairs at port, veterancy, that sink boats,
     fight other warships and capture trade ships, and can be sent anywhere at sea;
-  - **missile silos**, **SAM launchers**, **atom bombs**, **hydrogen bombs** and **MIRVs**;
+  - **missile silos**, **SAM launchers**, **atom bombs**, **hydrogen bombs** and **MIRVs**
+    (here 10 times stronger than in OpenFront: each of the 28 warheads destroys
+    10 times the area, one warhead per tick);
   - **alliances** (5 minutes), alliance requests, betrayal, targets, embargoes;
   - win by owning 80% of the land.
 - **Save and resume**: save from the pause menu, continue from the title screen.
@@ -105,8 +109,8 @@ around half of it.
 | Menu | `y=` | `window` | `zoom` | `trace` | `graph` |
 |---|---|---|---|---|---|
 | Main | Attack (shows the ratio and the troops sent); **Ship** when the cursor is on your warship | Boat (attack across the sea) | Build | Nuke | More |
-| Build (on land) | City | Port | Factory | Defense post | More: Silo, SAM |
-| Build (on water) | Warship | | | | Back |
+| Build (on land) | City | Port (snaps to your nearest coast within 8 tiles) | Factory | Defense post | More: Silo, SAM |
+| Build (on water) | Warship | Port (on your nearest coast) | | | Back |
 | Nuke | Atom bomb | Hydrogen bomb | MIRV | | Back |
 | More | Diplomacy | Attack ratio −10% | Attack ratio +10% | Info (your stats, leaderboard) | Game speed |
 | Diplomacy | Ally / Betray | Target | Embargo / Trade | Retreat | Back |
@@ -248,8 +252,9 @@ values are slow library loops. To reach OpenFront's 10 ticks per second:
 
 - the map lives in the unused half of video memory, one byte per tile;
 - tile coordinates, bitmaps, log2/exp2 use byte tables and byte moves, no shift loops;
-- the hottest helpers are hand-written eZ80 (front scan, log2/exp2/pow, the
-  troop-growth division), checked against their C versions;
+- the hottest code is hand-written eZ80 (attack front scans, the attack tile
+  loop, log2/exp2/pow, the troop-growth division), checked against its C
+  versions;
 - ship routes are guided by a coarse map of 8×8-tile cells: a quick search
   over the cells counts how far each one is from the goal, and the tile search
   follows that count around continents instead of filling every bay (at most

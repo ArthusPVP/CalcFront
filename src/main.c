@@ -216,22 +216,12 @@ static uint32_t benchSum[12], benchFrames;
 static uint16_t benchCheck, benchCk[12];
 static const uint16_t benchAt[12] = {0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000};
 
-const uint8_t *next_owned(const uint8_t *p, const uint8_t *end, uint8_t o);
-const uint8_t *next_owned_c(const uint8_t *p, const uint8_t *end, uint8_t o);
-
-/* the assembly scan against the C one on random rows: number of mismatches */
+/* the assembly against its C versions: number of mismatches (the attack
+ * routines have their own, attack_selftest(), left out: with it this build
+ * no longer fits in RAM next to the game's work area) */
 static uint16_t asm_selftest(void)
 {
-    static uint8_t buf[600];
     uint16_t k, bad = 0;
-    for (k = 0; k < sizeof buf; k++) buf[k] = (uint8_t)(rnd() & (rnd() & 1 ? 0xE3 : 0x63));
-    for (k = 0; k < 3000; k++) {
-        uint16_t a = rnd_n(590) + 4, b = a + rnd_n(300);
-        uint8_t o = (uint8_t)rnd_n(4);
-        if (b > 595) b = 595;
-        if (next_owned(buf + a, buf + b, o) != next_owned_c(buf + a, buf + b, o)) bad++;
-        if (next_owned(buf + b, buf + a, o) != next_owned_c(buf + b, buf + a, o)) bad++;
-    }
     /* fixed-point helpers (src/asm/fx.s): every scale of x, every exponent */
     for (k = 0; k < 3000; k++) {
         uint32_t x = ((uint32_t)rnd() << (k % 31)) ^ rnd();
@@ -547,7 +537,7 @@ static void draw_keys(void)
     for (i = 0; i < 5; i++) {
         uint8_t u = i < 3 ? keyUnit[menu][i] : 0;
         if (menu == M_BUILD && i == 3) u = U_POST;
-        if (menu == M_BUILD && water) u = i ? 0 : U_WARSHIP;
+        if (menu == M_BUILD && water) u = i == 0 ? U_WARSHIP : (i == 1 ? U_PORT : 0);
         top[i] = keyLabel[menu][i];
         bot[i] = c[i];
         col[i] = C_WHITE;
@@ -575,7 +565,8 @@ static void draw_keys(void)
     case M_BUILD:
         if (water) {
             top[0] = "Warship";
-            top[1] = top[2] = top[3] = "";
+            top[1] = "Port"; /* snaps to the nearest coast */
+            top[2] = top[3] = "";
             top[4] = "Back";
         }
         break;
@@ -1284,6 +1275,31 @@ static void act_attack(bool boat)
     if (!attack_start(HUMAN, o, send_amount(), true)) msg("Not enough troops", C_WHITE);
 }
 
+/* Port snapping: the nearest tile within 8 of the cursor where a port may go
+ * (own coast, away from other stations), so a port can be placed by
+ * aiming roughly at the shore, from land or from the sea; NO_TILE if none */
+#define SNAP_R 8
+static tile_t port_snap(void)
+{
+    int dx, dy, best = SNAP_R * SNAP_R + 1;
+    tile_t found = NO_TILE;
+    for (dy = -SNAP_R; dy <= SNAP_R; dy++) {
+        int y = (int)cury + dy;
+        if (y < 1 || y >= (int)g_H - 1) continue;
+        for (dx = -SNAP_R; dx <= SNAP_R; dx++) {
+            int x = (int)curx + dx, d = dx * dx + dy * dy;
+            tile_t u;
+            if (x < 1 || x >= (int)g_W - 1 || d >= best) continue;
+            u = TILE(x, y);
+            if (can_build(HUMAN, U_PORT, u)) {
+                best = d;
+                found = u;
+            }
+        }
+    }
+    return found;
+}
+
 static void act_diplo(uint8_t k)
 {
     uint8_t o = owner_at_cursor();
@@ -1360,15 +1376,29 @@ static void softkey(uint8_t k)
         if (k == 4) set_menu(M_MORE);
         break;
     case M_BUILD:
-        if (!IS_LAND(g_map[t])) {
+        if (!IS_LAND(g_map[t]) && k != 1) {
             if (k == 0 && build(HUMAN, U_WARSHIP, t)) msg("Warship launched", C_GREEN);
             if (k == 4) set_menu(M_MAIN);
         } else if (k == 4)
             set_menu(M_BUILD2);
         else {
             static const uint8_t types[4] = {U_CITY, U_PORT, U_FACTORY, U_POST};
-            bool up = has_struct(t);
-            if (build(HUMAN, types[k], t)) msg(up ? "Upgraded" : "Construction started", C_GREEN);
+            bool up = has_struct(t), snapped = false;
+            if (k == 1 && !can_build(HUMAN, U_PORT, t)) {
+                tile_t s = port_snap();
+                if (s != NO_TILE) {
+                    curx = tx(s);
+                    cury = ty(s);
+                    r_follow_cursor();
+                    infoDirty = keysDirty = true;
+                    t = s;
+                    up = has_struct(t);
+                    snapped = true;
+                }
+            }
+            if (build(HUMAN, types[k], t))
+                msg(up ? "Upgraded" : snapped ? "Port placed on the nearest coast" : "Construction started",
+                    C_GREEN);
         }
         keysDirty = true;
         break;

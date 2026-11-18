@@ -209,7 +209,7 @@ bool can_trade(uint8_t a, uint8_t b);
 #define RING 128
 
 typedef struct {
-    uint8_t active;
+    uint8_t active;    /* 0 free, 1 attack, 2 a landed boat's (see attack_start_at) */
     uint8_t att, def;
     uint8_t retreat;
     uint32_t troops;
@@ -251,7 +251,8 @@ enum {
  *  warship: dst = patrol centre, tgt = waypoint, hp, level = veterancy, aux = target unit + 1,
  *           aux2 = reload, orig = state, troops = kills, src = trade ships captured
  *  shell:   aux = target unit, aux2 = shooter unit, level = damage, timer = life
- *  nukes:   src = launch, dst = target, timer = flight, timer2 = flight time, aux = victim
+ *  nukes:   src = launch, dst = target, timer = flight, timer2 = flight time, aux = victim;
+ *           a MIRV that has landed: level = warheads left, dist = random tries left
  *  train:   src = segment start, tgt = next station, dst = final station,
  *           timer2 = step on segment, aux = segment length, dist = stops                   */
 typedef union {
@@ -378,6 +379,7 @@ void st_set(tile_t t, bool on);
 tile_t random_land(void);
 tile_t random_water_near(tile_t c, uint8_t r, uint8_t comp);
 tile_t nearest_own_shore(uint8_t p, tile_t to, uint8_t comp);
+tile_t own_shore_by_sea(uint8_t p, tile_t from, tile_t *water); /* departure by sea distance */
 uint8_t coast_bodies(uint8_t p);  /* bit c set: p has land next to water body c */
 void coast_rebuild(bool scan);
 void path_prepare(void);          /* build the coarse route guide now (after loading tiles) */
@@ -408,12 +410,16 @@ uint16_t sim_checksum(void);
 
 /* attack.c */
 bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwner);
+bool attack_start_at(uint8_t att, uint8_t def, uint32_t troops, tile_t land); /* landed boat */
 void attack_tick(void);
 void attack_retreat(uint8_t att, uint8_t def);
 bool borders(uint8_t att, uint8_t def);
 uint32_t incoming_troops(uint8_t p, uint8_t *from);
 bool attacking(uint8_t att, uint8_t def);
 void attacks_drop_player(uint8_t p);
+#ifdef CF_PERF
+uint16_t attack_selftest(void); /* assembly vs C: mismatches */
+#endif
 
 /* units.c */
 unit_t *new_unit(uint8_t type, uint8_t owner, tile_t pos);

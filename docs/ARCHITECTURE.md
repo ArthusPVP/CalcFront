@@ -50,9 +50,9 @@ exist. Tiles are indexed `y * width + x` (`tile_t`, 16-bit; `0xFFFF` = none).
 | `map.c` | Map file loading (header, size variants, nation list; the land total is counted from the tiles), ownership changes (`conquer`, `relinquish`), coastline queries, player bounding boxes and neighbours, straight lines, and ship routes: a greedy best-first search over one water body with a shared cache of routes. Long searches are guided by a coarse map of 8×8-tile cells: a breadth-first search over (cell, pool of water) from the goal gives each cell its distance, and the tile search expands the tile with the fewest cells left. Cells split by a headland keep a 2-bit pool number per tile so the guide never jumps across an isthmus. |
 | `save.c` | Saving and resuming: core values, players, active attacks, units, then the owner and fallout of every land tile, run-length coded. Water, terrain, the structure bitmap, railways, ship routes and per-tick caches are rebuilt on load. The bytes go through `plat_save_write` / `plat_save_read`. |
 | `game.c` | Game setup and spawning, the per-tick economy (troop cap, troop growth, gold, multipliers), player death, the land share (0.01%, from a cached reciprocal of the land left), the win check, and `game_tick()`, which runs every system in order. |
-| `attack.c` | Land attacks: finds the front between two players, keeps a ring of 128 front tiles, and takes tiles with OpenFront's cost and loss formulas (terrain, defense posts, fallout, big-empire and traitor modifiers), cached per terrain type each tick. Opposing attacks cancel troop for troop (you get a message when a bot counters yours), and an attack whose budget is full always takes its next tile, so a hopeless push ends instead of holding its troops forever. |
-| `units.c` | The unit table (200 slots) shared by every unit type, building rules and prices, upgrades, capture on conquest, per-player counts cached each tick, nukes and SAM interception, and `units_tick()`, which dispatches each unit to its update function. |
-| `ships.c` | Transport boats (land on the target's nearest coast that faces a sea the attacker touches, then start an attack), ports and trade ships (OpenFront's spawn odds and weighted destinations, gold by distance), warships (targets, shells, health, repair at port, veterancy, capturing trade ships, player orders). |
+| `attack.c` | Land attacks: finds the front between two players, keeps a ring of 128 front tiles, and takes tiles with OpenFront's cost and loss formulas (terrain, defense posts, fallout, big-empire and traitor modifiers), cached per terrain type each tick. A landed boat's attack (`attack_start_at`, `active` = 2) only grows from the tiles around its landing, is never merged with another attack, and ends (refunding its troops) when that front is gone; saved games keep its front. Opposing attacks cancel troop for troop (you get a message when a bot counters yours), and an attack whose budget is full always takes its next tile, so a hopeless push ends instead of holding its troops forever. |
+| `units.c` | The unit table (200 slots) shared by every unit type, building rules and prices, upgrades, capture on conquest, per-player counts cached each tick, nukes and SAM interception (a MIRV that lands keeps falling as one warhead per tick, so its 28 blasts never stall a frame), and `units_tick()`, which dispatches each unit to its update function. |
+| `ships.c` | Transport boats (land on the target owner's coast nearest to the aimed tile that faces a sea the attacker touches, with no distance limit; leave from the attacker's coast nearest by sea, found with the coarse guide in `map.c`; then start an attack), ports and trade ships (OpenFront's spawn odds and weighted destinations, gold by distance), warships (targets, shells, health, repair at port, veterancy, capturing trade ships, player orders). |
 | `rail.c` | Factories turn nearby cities, ports and factories into stations, links them with straight railways over land, sends trains to random reachable stops, and pays gold at each stop. Only changed track is repainted. |
 | `diplo.c` | Relations, alliance requests and expiry, betrayal and traitor status. Relations fade back toward neutral by 1 point every 16 ticks (OpenFront: 0.05 a tick). |
 | `ai.c` | Tribes (expand, retaliate, pick random neighbours) and nations (build economy and navy, nuke leaders, boat to weak overseas rivals, ask for help, betray on Hard and Impossible). Nations act every 80 / 64 / 56 / 40 ticks by difficulty and follow OpenFront's rules toward the player: attacks anger the defender by 60–90 by difficulty (hitting back at a hated attacker angers nobody), trade stops while they hate you and resumes on Easy and Medium once relations are neutral, enemies are forgotten when the war is over, they hit back only once saved up on Easy and Medium, and they spare you 3 times in 4 on Easy and 1 time in 4 on Medium. Each AI thinks on its own staggered schedule. |
@@ -73,8 +73,15 @@ needed → AI → diplomacy every 16 ticks → win check every 32 ticks.
 Hand-written eZ80, each with a C version for the PC harness (and for builds
 with `-DCF_NOASM`); the profiling build checks them against each other:
 
-- `src/asm/scan.s`: the loop that finds the next tile of a player along a row,
-  used by every attack front scan (C version in `attack.c`);
+- `src/asm/front.s`: the attack front scan, a whole box of rows in one call
+  (frontier tiles of the defender touching the attacker, reservoir-sampled
+  into the ring);
+- `src/asm/attack.s`: the per-tick setup and the tile loop of an attack, and
+  the small helpers they use (24-bit division, Q8 multiply, free-land cost,
+  `rnd_n` for small ranges). C versions in `attack.c`; `attack_selftest()`
+  checks them on random inputs and on copies of the running attacks, but the
+  profiling build leaves it out to fit in RAM: build it into a normal game
+  to run it;
 - `src/asm/fx.s`: `fx_log2`, `fx_exp2` and `fx_pow` for troop growth and caps
   (C versions in `fx.c`);
 - in `game.c`, the economy's 8-step division and MLT multiply, and in
