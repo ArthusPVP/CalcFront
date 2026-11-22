@@ -1,6 +1,25 @@
 /* map storage, ownership changes, shoreline queries, water pathfinding, lines */
 #include "sim.h"
 
+/* Hot paths in hand-written eZ80 (src/asm/map*.s): conquer(), scan_player(),
+ * the route search loop and the coarse guide's breadth-first search. Their C
+ * twins (suffix _c) serve the PC harness (and builds with -DCF_NOASM); the
+ * self-test build (-DCF_SELFTEST) has both and compares them, map_selftest(). */
+#if defined(HOST) || defined(CF_NOASM)
+#define MAP_C_ONLY
+#define conquer_c conquer
+#define scan_player_c scan_player
+#define search_loop_c search_loop
+#define bfs_loop_c bfs_loop
+#endif
+#if defined(MAP_C_ONLY) || defined(CF_SELFTEST)
+#define MAP_TWINS
+#endif
+#ifdef CF_SELFTEST
+void conquer_c(tile_t t, uint8_t p);
+void scan_player_c(uint8_t p);
+#endif
+
 uint16_t g_W, g_H;
 uint16_t g_rowStart[MAP_MAX_H + 1];
 uint16_t g_rowOfHi[256];
@@ -148,7 +167,8 @@ void st_set(tile_t t, bool on)
 
 /* coast[p][c]: pairs (land tile of p, water tile of body c next to it), kept
  * up to date on every change of owner so coast_bodies() needs no scan */
-static uint16_t coast[MAXP][8];
+__attribute__((used)) uint16_t map_coast[MAXP][8]; /* (src/asm/mapconq.s) */
+#define coast map_coast
 
 static void coast_move(tile_t t, uint8_t from, uint8_t to)
 {
@@ -173,7 +193,8 @@ void coast_rebuild(bool scan)
     }
 }
 
-void conquer(tile_t t, uint8_t p)
+#ifdef MAP_TWINS
+void conquer_c(tile_t t, uint8_t p)
 {
     uint8_t b = g_map[t], old = b & T_OWNER, i;
     uint16_t x, y;
@@ -207,6 +228,15 @@ void conquer(tile_t t, uint8_t p)
     if (has_struct(t)) unit_on_conquer(t, p);
     if (old && g_pl[old].tiles == 0) kill_player(old, p);
 }
+#endif
+#ifndef MAP_C_ONLY
+/* player_t fields read by the assembly (src/asm/mapconq.s) */
+_Static_assert(offsetof(player_t, tiles) == 20 && offsetof(player_t, minx) == 22, "player_t");
+_Static_assert(offsetof(player_t, maxx) == 24 && offsetof(player_t, miny) == 26, "player_t");
+_Static_assert(offsetof(player_t, maxy) == 28 && offsetof(player_t, nbrs) == 38, "player_t");
+_Static_assert(offsetof(player_t, nbrTN) == 46 && sizeof(player_t) == 256, "player_t");
+_Static_assert(sizeof map_coast == MAXP * 16 && T_TERR == 0x60 && T_OWNER == 31, "map_coast");
+#endif
 
 /* tile destroyed by a nuke: nobody owns it, fallout */
 void relinquish(tile_t t)
@@ -248,7 +278,8 @@ tile_t water_next_to(tile_t t, uint8_t comp)
     return NO_TILE;
 }
 
-void scan_player(uint8_t p)
+#ifdef MAP_TWINS
+void scan_player_c(uint8_t p)
 {
     player_t *pl = &g_pl[p];
     uint16_t x, y, x0 = pl->minx, x1 = pl->maxx, y0 = pl->miny, y1 = pl->maxy;
@@ -291,6 +322,7 @@ void scan_player(uint8_t p)
         pl->maxy = ny1;
     }
 }
+#endif
 
 tile_t random_land(void)
 {
@@ -391,8 +423,19 @@ typedef char hq_hk_follow[offsetof(sim_mem_t, hk) == offsetof(sim_mem_t, hq) + 2
 #ifdef PATH_STATS
 unsigned long g_pathPops, g_pathCalls, g_pathFails, g_pathMax, g_pathBfs, g_pathStates, g_pathOverflow;
 #endif
-static uint16_t hn;
-static uint16_t vn;
+/* the tile search's state, shared with its loop (src/asm/mapsrch.s) */
+typedef struct {
+    tile_t to;         /* goal */
+    uint16_t gx, gy;   /* its column and row */
+    uint8_t comp;      /* water body */
+    uint8_t guided;    /* keys from the coarse guide */
+    uint16_t budget;   /* tiles to expand at most */
+    uint16_t pops;     /* out: tiles expanded */
+    uint16_t hn, vn;   /* heap entries, visited tiles listed in vlist */
+} srch_t;
+__attribute__((used)) srch_t map_srch;
+#define hn (map_srch.hn)
+#define vn (map_srch.vn)
 static uint8_t pathbuf[MAX_PATHS][PATH_STEPS / 4];
 static uint16_t pathlen[MAX_PATHS];
 static tile_t pathFrom[MAX_PATHS], pathTo[MAX_PATHS];
@@ -435,19 +478,38 @@ bool path_complete(uint8_t slot) { return slot < MAX_PATHS && pathOk[slot] == 1;
 #define CS 8
 #define CMAX 1100
 #define NSPLIT 128
-static uint8_t cCross[CMAX];  /* bits 0-2 water body across the right border, 4-6 bottom */
-static uint8_t cSplit[CMAX];  /* 0 (one pool at most), or 1 + index into split* */
-static uint8_t cDist[CMAX];   /* cells left from the cell's pool, 255 = unknown */
-static uint8_t cPar[CMAX];    /* side toward the goal */
-static uint8_t splitLab[NSPLIT][16];  /* pool (0-3) of each tile, 2 bits per tile */
-static uint8_t splitSides[NSPLIT][4]; /* sides each pool crosses */
-static uint8_t splitDist[NSPLIT][4], splitPar[NSPLIT];
+/* (global: the assembly, src/asm/mapsrch.s, reads them) */
+#define cCross map_cCross
+#define cSplit map_cSplit
+#define cDist map_cDist
+#define cPar map_cPar
+#define splitLab map_splitLab
+#define splitSides map_splitSides
+#define splitDist map_splitDist
+#define splitPar map_splitPar
+#define cRow map_cRow
+#define cW map_cW
+#define gPool map_gPool
+#define cGoal map_cGoal
+__attribute__((used)) uint8_t cCross[CMAX]; /* bits 0-2 water body across the right border, 4-6 bottom */
+__attribute__((used)) uint8_t cSplit[CMAX]; /* 0 (one pool at most), or 1 + index into split* */
+__attribute__((used)) uint8_t cDist[CMAX];  /* cells left from the cell's pool, 255 = unknown */
+__attribute__((used)) uint8_t cPar[CMAX];   /* side toward the goal */
+__attribute__((used)) uint8_t splitLab[NSPLIT][16];  /* pool (0-3) of each tile, 2 bits per tile */
+__attribute__((used)) uint8_t splitSides[NSPLIT][4]; /* sides each pool crosses */
+__attribute__((used)) uint8_t splitDist[NSPLIT][4], splitPar[NSPLIT];
 static uint8_t nSplit;
-static uint16_t cRow[MAP_MAX_H / CS + 1];
-static uint8_t cW, cH, gPool;
-static uint16_t cN, cGoal;
+__attribute__((used)) uint16_t cRow[MAP_MAX_H / CS + 1];
+__attribute__((used)) uint8_t cW, gPool;
+static uint8_t cH;
+static uint16_t cN;
+__attribute__((used)) uint16_t cGoal;
 static bool cOn;  /* the grid fits this map */
 static bool cUse; /* the running search is guided */
+#ifdef CF_SELFTEST
+static bool stUseC;       /* map_selftest(): the C twins in place of the assembly */
+static uint16_t stStates; /* states of the last coarse_bfs() */
+#endif
 
 static const uint8_t sideBit[4] = {1, 2, 4, 8};
 
@@ -669,7 +731,8 @@ FORCE_INLINE uint8_t div8(uint16_t v)
 FORCE_INLINE uint16_t cell_of(uint16_t x, uint16_t y) { return cRow[div8(y)] + div8(x); }
 
 /* pools of cell nc (bit per pool) touching pool p of cell c across side a */
-static uint8_t border_pools(uint16_t c, uint8_t p, uint8_t a, uint16_t nc)
+#define border_pools map_border_pools
+__attribute__((used)) uint8_t border_pools(uint16_t c, uint8_t p, uint8_t a, uint16_t nc)
 {
     uint8_t cy = (uint8_t)(c / cW), w, h, n, lx = 0, ly = 0, nlx, nly, pools = 0;
     uint16_t x0 = (uint16_t)(c - cRow[cy]) * CS, y0 = (uint16_t)cy * CS;
@@ -700,37 +763,27 @@ static uint8_t border_pools(uint16_t c, uint8_t p, uint8_t a, uint16_t nc)
     return pools;
 }
 
-/* number the cells from the goal outward, until a few layers past the start */
-static void coarse_bfs(tile_t from, tile_t to, uint8_t comp)
+/* The breadth-first search over (cell, pool), the goal's already queued:
+ * cells in hq, their pools in hk (hq, hk and vlist follow each other); each
+ * (cell, pool) is queued once, at most CMAX + 3 * NSPLIT. It stops a few
+ * layers past the start's pool (sc, sPool). Returns the states dequeued.
+ * Assembly on the calculator (src/asm/mapbfs.s). */
+#ifdef MAP_TWINS
+uint16_t bfs_loop_c(uint16_t sc, uint8_t sPool, uint8_t comp)
 {
-    /* the queue: cells in hq, their pools in hk (hq, hk and vlist follow
-     * each other); each (cell, pool) is queued once, at most CMAX + 3 * NSPLIT */
     uint16_t *q = hq;
     uint8_t *qp = (uint8_t *)hk;
-    uint16_t qh = 0, qt = 1, gy = ty(to), gx = (uint16_t)(to - g_rowStart[gy]);
-    uint16_t sy = ty(from), sx = (uint16_t)(from - g_rowStart[sy]), sc = cell_of(sx, sy), step[4];
-    uint8_t stop = 255, sPool = pool_at(sc, (uint8_t)sx & 7, (uint8_t)sy & 7), comp4 = (uint8_t)(comp * 16);
-    cGoal = cell_of(gx, gy);
-    gPool = pool_at(cGoal, (uint8_t)gx & 7, (uint8_t)gy & 7);
+    uint16_t qh = 0, qt = 1, step[4], states = 0;
+    uint8_t stop = 255, comp4 = (uint8_t)(comp * 16);
     step[0] = 1;
     step[1] = 0xFFFF;
     step[2] = cW;
     step[3] = (uint16_t)-cW;
-    memset(cDist, 255, cN);
-    memset(splitDist, 255, (size_t)nSplit * 4);
-    node_set(cGoal, gPool, 0, 0);
-    q[0] = cGoal;
-    qp[0] = gPool;
-#ifdef PATH_STATS
-    g_pathBfs++;
-#endif
     while (qh < qt) {
         uint16_t c = q[qh];
         uint8_t p = qp[qh], k = cSplit[c], d, nd, a, sides;
         qh++;
-#ifdef PATH_STATS
-        g_pathStates++;
-#endif
+        states++;
         d = k ? splitDist[k - 1][p] : cDist[c];
         if (c == sc && p == sPool && stop == 255) stop = (uint8_t)(d > 250 ? 253 : d + 3);
         if (d >= stop) break;
@@ -786,8 +839,45 @@ static void coarse_bfs(tile_t from, tile_t to, uint8_t comp)
             splitPar[kn - 1] = par;
         }
     }
+    return states;
+}
+#endif
+#ifndef MAP_C_ONLY
+uint16_t bfs_loop(uint16_t sc, uint8_t sPool, uint8_t comp);
+_Static_assert(sizeof(sim_mem_t) == 8192 + 3 * 4096 && sizeof splitSides[0] == 4, "bfs"); /* hk at 12288 */
+#ifdef CF_SELFTEST
+uint16_t bfs_loop_c(uint16_t sc, uint8_t sPool, uint8_t comp);
+#endif
+#endif
+
+/* number the cells from the goal outward, until a few layers past the start */
+static void coarse_bfs(tile_t from, tile_t to, uint8_t comp)
+{
+    uint16_t gy = ty(to), gx = (uint16_t)(to - g_rowStart[gy]), states;
+    uint16_t sy = ty(from), sx = (uint16_t)(from - g_rowStart[sy]), sc = cell_of(sx, sy);
+    uint8_t sPool = pool_at(sc, (uint8_t)sx & 7, (uint8_t)sy & 7);
+    cGoal = cell_of(gx, gy);
+    gPool = pool_at(cGoal, (uint8_t)gx & 7, (uint8_t)gy & 7);
+    memset(cDist, 255, cN);
+    memset(splitDist, 255, (size_t)nSplit * 4);
+    node_set(cGoal, gPool, 0, 0);
+    hq[0] = cGoal;
+    ((uint8_t *)hk)[0] = gPool;
+#ifdef CF_SELFTEST
+    states = stUseC ? bfs_loop_c(sc, sPool, comp) : bfs_loop(sc, sPool, comp);
+    stStates = states;
+#else
+    states = bfs_loop(sc, sPool, comp);
+#endif
+#ifdef PATH_STATS
+    g_pathBfs++;
+    g_pathStates += states;
+#else
+    (void)states;
+#endif
 }
 
+#ifdef MAP_TWINS /* the route search loop's helpers (the C twin only) */
 /* guided search key of the tile at (lx, ly) of a pool d cells from the goal's
  * (side par toward it), m tiles from the goal: 16 per cell left plus the
  * distance to the cell side toward the goal */
@@ -819,6 +909,7 @@ FORCE_INLINE uint16_t guide_key(uint16_t c, uint8_t lx, uint8_t ly, uint16_t m)
     if (c == cGoal) return m; /* gPool is 0 there */
     return cell_key(cDist[c], cPar[c], lx, ly, m);
 }
+#endif
 
 /* The heap of the tile search: key and tile side by side, HEAPN entries over
  * hq and hk (they follow each other). */
@@ -828,6 +919,7 @@ typedef struct {
 } hent_t;
 typedef char hent_size[sizeof(hent_t) == 4 ? 1 : -1];
 
+#ifdef MAP_TWINS
 /* (i - 1) / 2 for a heap index (a 16-bit shift by one is inline code) */
 FORCE_INLINE uint16_t parent(uint16_t i) { return (uint16_t)(i - 1) >> 1; }
 
@@ -868,6 +960,7 @@ FORCE_INLINE tile_t heap_pop(hent_t *h)
     *(hent_t *)(b + o) = last;
     return top;
 }
+#endif
 
 /* direction back to the parent, from a visited tile's scratch bits 3-4 */
 FORCE_INLINE uint8_t back_of(uint8_t b)
@@ -879,7 +972,7 @@ FORCE_INLINE uint8_t back_of(uint8_t b)
 /* box around the visited tiles vlist had no room for */
 static uint16_t farX0, farX1, farY0, farY1;
 
-static void note_far(tile_t t)
+__attribute__((used)) void map_note_far(tile_t t)
 {
     uint16_t y = ty(t), x = (uint16_t)(t - g_rowStart[y]);
     if (x < farX0) farX0 = x;
@@ -888,52 +981,36 @@ static void note_far(tile_t t)
     if (y > farY1) farY1 = y;
 }
 
-/* Greedy best-first search over one water body, expanding at most `budget`
- * tiles. Each visited tile remembers the direction back to its parent. The
- * map frame is water body 0, so the search never leaves the map. Keys are
- * the Manhattan distance to the goal, or with the guide, guide_key(); the
- * cell and the distance of a new tile follow from the expanded tile's. */
-static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
+/* The search loop: pops the heap (map_srch.hn entries, the start tile
+ * already in) until the goal, an empty heap or the end of the budget; 1 when
+ * the goal is reached. Expanded tiles in map_srch.pops. Assembly on the
+ * calculator (src/asm/mapsrch.s). */
+#ifdef MAP_TWINS
+uint8_t search_loop_c(void)
 {
     /* one step in direction i (as g_dirofs): local x and y in the cell, and
      * the next cell when they leave it */
     static const uint8_t stepX[4] = {1, 0xFF, 0, 0}, stepY[4] = {0, 0, 1, 0xFF};
     static const uint8_t backBits[4] = {1 << W_DIRSH, 0, 3 << W_DIRSH, 2 << W_DIRSH};
     hent_t *h = (hent_t *)hq;
-    uint16_t n = 0, gx, gy, x, y, k, pc = 0, cStep[4];
-    uint8_t comp = g_map[from] & T_COMP, i, plx = 0, ply = 0;
-    bool ok = false, overflow, guided = cUse;
-    tile_t t;
+    uint16_t gx = map_srch.gx, gy = map_srch.gy, pc = 0, cStep[4], budget = map_srch.budget, pops = 0;
+    uint8_t comp = map_srch.comp, i, plx = 0, ply = 0, ok = 0, guided = map_srch.guided;
+    tile_t t, to = map_srch.to;
 
-    pathlen[slot] = 0;
-    if (from == to) return true;
-
-    gy = ty(to);
-    gx = (uint16_t)(to - g_rowStart[gy]);
     cStep[0] = 1;
     cStep[1] = 0xFFFF;
     cStep[2] = cW;
     cStep[3] = (uint16_t)(0 - cW);
-    vn = 0;
-    farX0 = farY0 = 0xFFFF;
-    farX1 = farY1 = 0;
-    g_map[from] |= W_VIS;
-    vlist[vn++] = from;
-    h[0].k = 0;
-    h[0].t = from;
-    hn = 1;
     while (hn) {
         uint16_t px, py, m;
         uint8_t tw = 0; /* directions toward the goal (bit per direction) */
         t = heap_pop(h);
         if (t == to) {
-            ok = true;
+            ok = 1;
             break;
         }
         if (!budget--) break;
-#ifdef PATH_STATS
-        g_pathPops++;
-#endif
+        pops++;
         py = ty_in(t);
         px = (uint16_t)(t - g_rowStart[py]);
         if (px < gx) tw = 1;
@@ -956,7 +1033,7 @@ static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
             if (vn < VMAX)
                 vlist[vn++] = nt;
             else
-                note_far(nt);
+                map_note_far(nt);
             /* one step: one tile closer to or further from the goal */
             nm = (uint16_t)(m + 1 - ((tw & sideBit[i]) ? 2 : 0));
             if (guided) {
@@ -973,6 +1050,62 @@ static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
             heap_push(h, nt, nm);
         }
     }
+    map_srch.pops = pops;
+    return ok;
+}
+#endif
+#ifndef MAP_C_ONLY
+uint8_t search_loop(void);
+/* layouts read by src/asm/mapsrch.s */
+_Static_assert(offsetof(srch_t, to) == 0 && offsetof(srch_t, gx) == 2 && offsetof(srch_t, gy) == 4, "srch_t");
+_Static_assert(offsetof(srch_t, comp) == 6 && offsetof(srch_t, guided) == 7, "srch_t");
+_Static_assert(offsetof(srch_t, budget) == 8 && offsetof(srch_t, pops) == 10, "srch_t");
+_Static_assert(sizeof(srch_t) == 16, "srch_t"); /* hn at 12, vn at 14 */
+_Static_assert(offsetof(sim_mem_t, railbits) == 0 && sizeof(sim_mem_t) == 20480, "sim_mem_t"); /* hq at 8192, vlist at 16384 */
+_Static_assert(HEAPN == 2048 && VMAX == 2048 && W_VIS == 0x80 && W_DIRSH == 3, "search");
+_Static_assert(sizeof cRow[0] == 2 && sizeof splitLab[0] == 16 && sizeof splitDist[0] == 4, "guide");
+#ifdef CF_SELFTEST
+uint8_t search_loop_c(void);
+#endif
+#endif
+
+/* Greedy best-first search over one water body, expanding at most `budget`
+ * tiles. Each visited tile remembers the direction back to its parent. The
+ * map frame is water body 0, so the search never leaves the map. Keys are
+ * the Manhattan distance to the goal, or with the guide, guide_key(); the
+ * cell and the distance of a new tile follow from the expanded tile's. */
+static bool search(tile_t from, tile_t to, uint8_t slot, uint16_t budget)
+{
+    hent_t *h = (hent_t *)hq;
+    uint16_t n = 0, x, y, k;
+    bool ok, overflow;
+    tile_t t;
+
+    pathlen[slot] = 0;
+    if (from == to) return true;
+
+    map_srch.to = to;
+    map_srch.gy = ty(to);
+    map_srch.gx = (uint16_t)(to - g_rowStart[map_srch.gy]);
+    map_srch.comp = g_map[from] & T_COMP;
+    map_srch.guided = cUse;
+    map_srch.budget = budget;
+    vn = 0;
+    farX0 = farY0 = 0xFFFF;
+    farX1 = farY1 = 0;
+    g_map[from] |= W_VIS;
+    vlist[vn++] = from;
+    h[0].k = 0;
+    h[0].t = from;
+    hn = 1;
+#ifdef CF_SELFTEST
+    ok = stUseC ? search_loop_c() : search_loop();
+#else
+    ok = search_loop();
+#endif
+#ifdef PATH_STATS
+    g_pathPops += map_srch.pops;
+#endif
     if (ok) {
         /* count the steps walking back from the goal, then store them forward
          * (step k in bits (k & 3) * 2 of byte k / 4) */
@@ -1137,3 +1270,144 @@ uint8_t path_find(tile_t from, tile_t to)
     pathAge[slot] = pathClock;
     return slot;
 }
+
+#ifdef CF_SELFTEST
+/* Self-test build: the assembly of src/asm/map*.s against the C twins, on the
+ * live game (conquests of random tiles, every player's scan, coarse guides
+ * and route searches between random sea tiles), each run from the same state
+ * and the state put back after. Returns the number of mismatches. Scratch:
+ * the route search's heap and vlist (free outside a search). */
+static uint24_t st_hash(const void *v, uint24_t n, uint24_t h)
+{
+    const uint8_t *p = v;
+    while (n--) h = h * 33 + *p++;
+    return h;
+}
+
+static uint24_t st_conq(tile_t t, uint8_t p, bool useC)
+{
+    if (useC)
+        conquer_c(t, p);
+    else
+        conquer(t, p);
+    return st_hash(g_pl, sizeof g_pl, st_hash(coast, sizeof coast, g_map[t] + g_landLeft * 3u + g_mapClean));
+}
+
+static tile_t st_sea(uint8_t comp)
+{
+    uint8_t k;
+    for (k = 0; k < 250; k++) {
+        tile_t t = rnd_tile(0, g_W, 0, g_H);
+        uint8_t b = g_map[t];
+        if (!IS_LAND(b) && (b & T_COMP) && (!comp || (b & T_COMP) == comp)) return t;
+    }
+    return NO_TILE;
+}
+
+/* one route search: its result, heap and visited list */
+static uint24_t st_search(tile_t from, tile_t to, uint16_t budget, bool useC)
+{
+    uint24_t h;
+    bool ok;
+    stUseC = useC;
+    ok = search(from, to, 0, budget);
+    stUseC = false;
+    h = st_hash(&map_srch, sizeof map_srch, ok);
+    h = st_hash(pathbuf[0], sizeof pathbuf[0], h + pathlen[0]);
+    h = st_hash(hq, (uint24_t)hn * 4, h);
+    return st_hash(vlist, (uint24_t)vn * 2, h);
+}
+
+/* one coarse guide, from the cPar and splitPar saved in vlist */
+static uint24_t st_bfs(tile_t from, tile_t to, uint8_t comp, bool useC)
+{
+    const uint8_t *save = (const uint8_t *)vlist;
+    memcpy(cPar, save, cN);
+    memcpy(splitPar, save + CMAX, NSPLIT);
+    stUseC = useC;
+    coarse_bfs(from, to, comp);
+    stUseC = false;
+    return st_hash(cDist, cN, st_hash(cPar, cN, st_hash(splitDist, sizeof splitDist,
+                                                         st_hash(splitPar, sizeof splitPar, stStates))));
+}
+
+uint16_t map_selftest(void)
+{
+    uint8_t st[4], *pl0 = (uint8_t *)hq, *co0 = (uint8_t *)vlist, pbuf[sizeof pathbuf[0]], p;
+    uint16_t bad = 0, k, plen = pathlen[0];
+    rnd_get(st);
+    memcpy(pbuf, pathbuf[0], sizeof pbuf);
+    path_ready();
+    /* conquests: g_pl saved in hq and hk (8 KB), the coast counts in vlist */
+    memcpy(pl0, g_pl, sizeof g_pl);
+    memcpy(co0, coast, sizeof coast);
+    for (k = 0; k < 300; k++) {
+        tile_t t = k < 40 ? rnd_tile(0, g_W, 0, g_H) : random_land();
+        uint8_t b, old, mc = g_mapClean;
+        uint16_t ll = g_landLeft;
+        uint24_t h1, h2;
+        if (t == NO_TILE) continue;
+        b = g_map[t];
+        old = b & T_OWNER;
+        p = (uint8_t)(1 + rnd_n(g_nplayers));
+        if (k & 7) {
+            /* mostly a neighbour's tile, as attacks take them */
+            tile_t n = (tile_t)(t + g_dirofs[k & 3]);
+            if (IS_LAND(b) && IS_LAND(g_map[n]) && (g_map[n] & T_OWNER)) p = g_map[n] & T_OWNER;
+        }
+        if (IS_LAND(b) && (has_struct(t) || (old && old != p && g_pl[old].tiles < 2))) continue;
+        h1 = st_conq(t, p, true);
+        memcpy(g_pl, pl0, sizeof g_pl);
+        memcpy(coast, co0, sizeof coast);
+        g_map[t] = b;
+        g_landLeft = ll;
+        g_mapClean = mc;
+        h2 = st_conq(t, p, false);
+        if (h1 != h2) bad++;
+        memcpy(g_pl, pl0, sizeof g_pl);
+        memcpy(coast, co0, sizeof coast);
+        g_map[t] = b;
+        g_landLeft = ll;
+        g_mapClean = mc;
+    }
+    /* scans of every player (results compared, then the player put back) */
+    for (p = 1; p <= g_nplayers; p++) {
+        player_t a;
+        if (!g_pl[p].tiles) continue;
+        scan_player_c(p);
+        a = g_pl[p];
+        memcpy(&g_pl[p], pl0 + p * sizeof(player_t), sizeof(player_t));
+        scan_player(p);
+        if (memcmp(&a, &g_pl[p], sizeof a)) bad++;
+        memcpy(&g_pl[p], pl0 + p * sizeof(player_t), sizeof(player_t));
+    }
+    /* coarse guides and route searches between random sea tiles */
+    if (cOn)
+        for (k = 0; k < 60; k++) {
+            tile_t from = st_sea(0), to;
+            uint8_t comp;
+            uint16_t budget = k % 3 == 0 ? 500 : k % 3 == 1 ? 30000 : (uint16_t)(1 + rnd_n(400));
+            uint24_t h1, h2, m0 = 0;
+            if (from == NO_TILE) continue;
+            comp = g_map[from] & T_COMP;
+            to = (k & 1) ? random_water_near(from, 30, comp) : st_sea(comp);
+            if (to == NO_TILE) continue;
+            memcpy(vlist, cPar, cN);
+            memcpy((uint8_t *)vlist + CMAX, splitPar, NSPLIT);
+            h1 = st_bfs(from, to, comp, true);
+            h2 = st_bfs(from, to, comp, false);
+            if (h1 != h2) bad++;
+            if (k < 6) m0 = st_hash(g_map, (uint24_t)g_W * g_H, 0);
+            cUse = (k & 2) != 0;
+            h1 = st_search(from, to, budget, true);
+            h2 = st_search(from, to, budget, false);
+            cUse = false;
+            if (h1 != h2) bad++;
+            if (k < 6 && m0 != st_hash(g_map, (uint24_t)g_W * g_H, 0)) bad++;
+        }
+    memcpy(pathbuf[0], pbuf, sizeof pbuf);
+    pathlen[0] = plen;
+    rnd_set(st);
+    return bad;
+}
+#endif

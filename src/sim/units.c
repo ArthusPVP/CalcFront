@@ -31,6 +31,16 @@ void nuke_radius(uint8_t type, uint8_t *inner, uint8_t *outer)
 
 uint8_t g_unHi; /* every unit lives below this index */
 
+/* recount() is skipped while nothing it counts has changed: set by every
+ * change of a counted unit (type below NCOUNT: creation, deletion, owner,
+ * level, a post being finished) and by build() */
+uint8_t g_unChanged = 1;
+static uint24_t rcTick;
+#ifdef CF_CHECKRC
+unsigned long g_rcSkip;
+#endif
+#define NCOUNT (U_WARSHIP + 1)
+
 unit_t *new_unit(uint8_t type, uint8_t owner, tile_t pos)
 {
     uint8_t i;
@@ -44,6 +54,7 @@ unit_t *new_unit(uint8_t type, uint8_t owner, tile_t pos)
             u->pos = pos;
             u->path = 0xFF;
             u->level = 1;
+            if (type < NCOUNT) g_unChanged = 1;
             return u;
         }
     return 0;
@@ -58,18 +69,95 @@ void del_unit(unit_t *u)
         ui_dirty_unit(u->pos);
     }
     if (u->type == U_BOAT && g_pl[u->owner].boats) g_pl[u->owner].boats--;
+    if (u->type < NCOUNT) g_unChanged = 1;
     path_release(u->path);
     u->path = 0xFF;
     u->type = U_NONE;
 }
 
-/* coordinates and slots of every building (refreshed each tick, appended to
- * by build()), for the spacing rule and fast lookups */
+/* coordinates and slots of every building (refreshed by recount(), appended
+ * to by build()), for the spacing rule and fast lookups: un_st[0] and
+ * un_st[1] hold the low and high bytes of their tiles, un_st[2] their slots */
 static uint16_t stX[MAX_UNITS], stY[MAX_UNITS];
-static uint8_t stIdx[MAX_UNITS];
-static uint8_t nSt;
+uint8_t un_st[3][MAX_UNITS];
+uint8_t un_nSt;
+#define stIdx (un_st[2])
+#define nSt un_nSt
 
-int16_t unit_at(tile_t t)
+static void st_add(uint8_t i, tile_t t)
+{
+    u16b_t v;
+    uint16_t y = ty(t);
+    v.v = t;
+    un_st[0][nSt] = v.b[0];
+    un_st[1][nSt] = v.b[1];
+    stIdx[nSt] = i;
+    stY[nSt] = y;
+    stX[nSt++] = (uint16_t)(t - g_rowStart[y]);
+}
+
+/* trade ships and trains seen by units_next() */
+uint8_t ut_cnt[2];
+
+#if defined(HOST) || defined(CF_NOASM) || defined(CF_SELFTEST)
+/* The C versions of src/asm/units.s (see there) */
+uint8_t units_next_c(uint8_t i)
+{
+    uint8_t hi = g_unHi;
+    for (; i < hi; i++) {
+        unit_t *u = &g_un[i];
+        uint8_t t = u->type;
+        if (t == U_NONE) continue;
+        if (t == U_TRADE) ut_cnt[0]++;
+        if (t == U_TRAIN) ut_cnt[1]++;
+        if (t <= U_SAM) {
+            if (!u->timer) {
+                if ((t == U_PORT || t == U_FACTORY) && !(((uint8_t)g_tick + i) & 7)) return i;
+                continue;
+            }
+        } else if (t == U_WARSHIP || (t >= U_ATOM && t <= U_SHELL))
+            return i;
+        else if (t >= U_TYPES)
+            continue;
+        if (u->timer == 1) return i; /* runs out: C's turn */
+        u->timer--;
+    }
+    return i;
+}
+
+int16_t st_find_c(tile_t t)
+{
+    u16b_t v;
+    uint8_t j;
+    v.v = t;
+    for (j = 0; j < nSt; j++) {
+        unit_t *u;
+        if (un_st[0][j] != v.b[0] || un_st[1][j] != v.b[1]) continue;
+        u = &g_un[stIdx[j]];
+        if (u->pos == t && IS_STRUCT(u->type)) return stIdx[j];
+    }
+    return -1;
+}
+#endif
+#if defined(HOST) || defined(CF_NOASM)
+#define units_next units_next_c
+#define st_find st_find_c
+#else
+uint8_t units_next(uint8_t i);
+int16_t st_find(tile_t t);
+_Static_assert(sizeof(unit_t) == 32 && offsetof(unit_t, pos) == 2 && offsetof(unit_t, timer) == 10,
+               "unit_t offsets used by src/asm/units.s");
+_Static_assert(U_PORT == 3 && U_FACTORY == 4 && U_SAM == 6 && U_TRADE == 8 && U_WARSHIP == 9 &&
+                   U_SHELL == 13 && U_TRAIN == 14 && U_BOOM == 15 && U_TYPES == 16 && MAX_UNITS == 200,
+               "constants used by src/asm/units.s");
+#endif
+
+/* There is at most one structure per tile (build() upgrades the one standing
+ * there, and only deleting it clears the tile's structure bit), so finding it
+ * through the list (where an entry left by a deleted one is skipped) gives
+ * the same slot as any other search. */
+#ifdef CF_CHECKRC
+static int16_t unit_at_orig(tile_t t)
 {
     uint8_t i;
     if (!has_struct(t)) return -1;
@@ -77,44 +165,67 @@ int16_t unit_at(tile_t t)
         unit_t *u = &g_un[stIdx[i]];
         if (u->pos == t && IS_STRUCT(u->type)) return stIdx[i];
     }
-    /* built this tick and not listed yet */
     for (i = 0; i < g_unHi; i++)
         if (g_un[i].pos == t && IS_STRUCT(g_un[i].type)) return i;
     return -1;
 }
+static int16_t unit_at2(tile_t t);
+int16_t unit_at(tile_t t)
+{
+    int16_t a = unit_at2(t), b = unit_at_orig(t);
+    uint8_t i, n = 0;
+    extern int printf(const char *, ...);
+    if (a != b) printf("!! unit_at %d %d\n", a, b);
+    for (i = 0; i < g_unHi; i++)
+        if (g_un[i].pos == t && IS_STRUCT(g_un[i].type)) n++;
+    if (n > 1) printf("!! two structures on %u\n", t);
+    return a;
+}
+#define unit_at unit_at2
+static
+#endif
+int16_t unit_at(tile_t t)
+{
+    uint8_t i;
+    int16_t k;
+    if (!has_struct(t)) return -1;
+    if ((k = st_find(t)) >= 0) return k;
+    /* not listed: the list was full */
+    for (i = 0; i < g_unHi; i++)
+        if (g_un[i].pos == t && IS_STRUCT(g_un[i].type)) return i;
+    return -1;
+}
+#undef unit_at
 
-/* per-player unit counts and structure levels, recounted every tick and
+/* per-player unit counts and structure levels, recounted at the start of a
+ * tick (when something changed, see g_unChanged) and
  * bumped by build() so decisions within a tick see their own builds */
-#define NCOUNT (U_WARSHIP + 1)
-static uint8_t cntTab[MAXP][NCOUNT];
-static uint16_t lvTab[MAXP][NCOUNT];
+static uint8_t cntTab[NCOUNT][MAXP]; /* [type][player]: no multiply */
+static uint16_t lvTab[NCOUNT][MAXP];
 #define MAX_POSTS 48
 static tile_t postPos[MAX_POSTS];
 static uint8_t postOwn[MAX_POSTS], nPosts;
 
 
-uint8_t count_units(uint8_t p, uint8_t type) { return type < NCOUNT ? cntTab[p][type] : 0; }
+uint8_t count_units(uint8_t p, uint8_t type) { return type < NCOUNT ? cntTab[type][p] : 0; }
 
-uint16_t levels_of(uint8_t p, uint8_t type) { return type < NCOUNT ? lvTab[p][type] : 0; }
+uint16_t levels_of(uint8_t p, uint8_t type) { return type < NCOUNT ? lvTab[type][p] : 0; }
 
 static void recount(void)
 {
     uint8_t i, hi = g_unHi;
     unit_t *u = g_un;
+    g_unChanged = 0;
+    rcTick = g_tick;
     memset(cntTab, 0, sizeof cntTab);
     memset(lvTab, 0, sizeof lvTab);
     nPosts = 0;
     nSt = 0;
     for (i = 0; i < hi; i++, u++) {
         if (u->type == U_NONE || u->type >= NCOUNT) continue;
-        if (IS_STRUCT(u->type)) {
-            uint16_t y = ty(u->pos);
-            stIdx[nSt] = i;
-            stY[nSt] = y;
-            stX[nSt++] = (uint16_t)(u->pos - g_rowStart[y]);
-        }
-        cntTab[u->owner][u->type]++;
-        lvTab[u->owner][u->type] += u->level;
+        if (IS_STRUCT(u->type)) st_add(i, u->pos);
+        cntTab[u->type][u->owner]++;
+        lvTab[u->type][u->owner] += u->level;
         if (u->type == U_POST && BUILT(u) && nPosts < MAX_POSTS) {
             postPos[nPosts] = u->pos;
             postOwn[nPosts++] = u->owner;
@@ -219,16 +330,12 @@ bool build(uint8_t p, uint8_t type, tile_t t)
         u->timer = buildTime[type];
         st_set(t, true);
         ui_dirty_unit(t);
-        if (nSt < MAX_UNITS) {
-            uint16_t y = ty(t);
-            stIdx[nSt] = (uint8_t)(u - g_un);
-            stY[nSt] = y;
-            stX[nSt++] = (uint16_t)(t - g_rowStart[y]);
-        }
+        if (nSt < MAX_UNITS) st_add((uint8_t)(u - g_un), t);
     }
     pl->gold -= cost;
-    cntTab[p][type] += !up;
-    lvTab[p][type]++;
+    g_unChanged = 1;
+    cntTab[type][p] += !up;
+    lvTab[type][p]++;
     return true;
 }
 
@@ -252,6 +359,7 @@ void unit_on_conquer(tile_t t, uint8_t newOwner)
         g_pl[newOwner].cityLv += u->level;
     }
     u->owner = newOwner;
+    g_unChanged = 1;
     ui_dirty_unit(t);
 }
 
@@ -451,15 +559,34 @@ void units_refresh(void)
 /* ----------------------------------------------------------------- tick --- */
 void units_tick(void)
 {
-    uint8_t i, nt = 0, ntr = 0;
-    PROF(3, recount());
+    uint8_t i;
+    if (g_unChanged || g_tick != rcTick + 1 || g_tick == 1) PROF(3, recount());
+    else {
+#ifdef CF_CHECKRC
+        static uint8_t c0[sizeof cntTab], l0[sizeof lvTab], s0[sizeof un_st], p1[MAX_POSTS];
+        static uint16_t x0[MAX_UNITS], y0[MAX_UNITS], p0[MAX_POSTS];
+        uint8_t n0 = nSt, n1 = nPosts;
+        memcpy(c0, cntTab, sizeof c0); memcpy(l0, lvTab, sizeof l0); memcpy(s0, un_st, sizeof s0);
+        memcpy(x0, stX, sizeof x0); memcpy(y0, stY, sizeof y0); memcpy(p0, postPos, sizeof p0); memcpy(p1, postOwn, sizeof p1);
+        recount();
+        if (n0 != nSt || n1 != nPosts || memcmp(c0, cntTab, sizeof c0) || memcmp(l0, lvTab, sizeof l0) ||
+            memcmp(s0, un_st[0], nSt) || memcmp(s0 + MAX_UNITS, un_st[1], nSt) || memcmp(s0 + 2 * MAX_UNITS, un_st[2], nSt) || memcmp(x0, stX, 2 * nSt) || memcmp(y0, stY, 2 * nSt) ||
+            memcmp(p0, postPos, 2 * nPosts) || memcmp(p1, postOwn, nPosts)) {
+            extern int printf(const char *, ...);
+            printf("!! recount skipped wrongly at tick %u\n", (unsigned)g_tick);
+        }
+        g_rcSkip++;
+        if (g_tick % 2000 == 0) { extern int printf(const char *, ...); printf("rcskip %lu at %u\n", g_rcSkip, (unsigned)g_tick); }
+#endif
+        rcTick = g_tick;
+    }
     for (i = 1; i <= g_nplayers; i++) g_pl[i].nPost = 0;
     for (i = 0; i < nPosts; i++) g_pl[postOwn[i]].nPost++;
-    for (i = 0; i < g_unHi; i++) {
+    /* the units that need more than a timer counted down */
+    ut_cnt[0] = ut_cnt[1] = 0;
+    for (i = units_next(0); i < g_unHi; i = units_next((uint8_t)(i + 1))) {
         unit_t *u = &g_un[i];
         switch (u->type) {
-        case U_NONE:
-            break;
         case U_CITY:
         case U_POST:
         case U_PORT:
@@ -469,6 +596,7 @@ void units_tick(void)
             if (u->timer) {
                 if (--u->timer == 0 && !BUILT(u)) {
                     u->hp = 1;
+                    g_unChanged = 1;
                     if (u->type == U_CITY) g_pl[u->owner].cityLv += u->level;
                     if (IS_STATIONABLE(u->type)) rail_mark_dirty();
                     ui_dirty_unit(u->pos);
@@ -482,7 +610,6 @@ void units_tick(void)
             PROF(6, boat_tick(u));
             break;
         case U_TRADE:
-            nt++;
             PROF(6, trade_tick(u));
             break;
         case U_WARSHIP:
@@ -492,7 +619,6 @@ void units_tick(void)
             shell_tick(u);
             break;
         case U_TRAIN:
-            ntr++;
             PROF(7, train_tick(u));
             break;
         case U_ATOM:
@@ -505,7 +631,137 @@ void units_tick(void)
             break;
         }
     }
-    g_nTrade = nt;
-    g_nTrain = ntr;
+    g_nTrade = ut_cnt[0];
+    g_nTrain = ut_cnt[1];
     while (g_unHi && g_un[g_unHi - 1].type == U_NONE) g_unHi--;
 }
+
+#ifdef CF_SELFTEST
+/* ------------------------------------------------------------ self-test --- */
+/* random changes to the units and the structure list (types, timers, list
+ * entries made stale, a few listed structures, tick, end of the units; none
+ * in round 0), then a start slot and tiles to look up, mostly listed ones */
+static void st_mess(uint16_t round, uint8_t *from, tile_t *t)
+{
+    static const uint16_t tm[8] = {0, 1, 2, 255, 256, 257, 0xFFFF, 3};
+    uint8_t k, n = round ? (uint8_t)rnd_n(12) : 0;
+    for (k = 0; k < n; k++) {
+        unit_t *u = &g_un[rnd_n(MAX_UNITS)];
+        uint8_t r = (uint8_t)rnd_n(3), j = (uint8_t)rnd_n(MAX_UNITS);
+        if (rnd() & 1) u->type = (uint8_t)rnd_n(U_TYPES + 2);
+        u->timer = (rnd() & 1) ? tm[rnd() & 7] : rnd();
+        if (!(rnd() & 3)) un_st[r][j] = (uint8_t)(r == 2 ? rnd_n(MAX_UNITS) : rnd());
+    }
+    if (round) {
+        for (k = 0; k < 3; k++) { /* idle listed structures, whatever the game has */
+            uint8_t i = (uint8_t)rnd_n(g_unHi < MAX_UNITS ? g_unHi + 1u : MAX_UNITS);
+            uint8_t j = (uint8_t)rnd_n(un_nSt < MAX_UNITS ? un_nSt + 1u : MAX_UNITS);
+            u16b_t v;
+            g_un[i].type = (uint8_t)(U_CITY + rnd_n(U_SAM - U_CITY + 1));
+            g_un[i].timer = 0;
+            v.v = g_un[i].pos;
+            un_st[0][j] = v.b[0];
+            un_st[1][j] = v.b[1];
+            un_st[2][j] = i;
+            if (j == un_nSt) un_nSt++;
+        }
+        g_tick = rnd();
+        if (!(rnd() & 3)) g_unHi = (uint8_t)rnd_n(MAX_UNITS + 1);
+        if (!(rnd() & 7)) un_nSt = (uint8_t)rnd_n(MAX_UNITS + 1);
+    }
+    *from = (uint8_t)((rnd() & 7) ? rnd_n(g_unHi + 1u) : rnd_n(256));
+    ut_cnt[0] = (uint8_t)rnd();
+    ut_cnt[1] = (uint8_t)rnd();
+    for (k = 0; k < 8; k++) {
+        u16b_t v;
+        uint8_t j = (uint8_t)rnd_n(un_nSt ? un_nSt : 1);
+        v.b[0] = un_st[0][j];
+        v.b[1] = un_st[1][j];
+        switch (rnd() & 7) {
+        case 0: v.v = rnd(); break;
+        case 1: v.v = g_un[rnd_n(MAX_UNITS)].pos; break;
+        case 2: v.v++; break;
+        case 3: v.v += 256; break;
+        }
+        t[k] = v.v;
+    }
+}
+
+static uint24_t timer_sum(void)
+{
+    uint24_t s = 0;
+    uint8_t j;
+    for (j = 0; j < MAX_UNITS; j++) s += g_un[j].timer;
+    return s;
+}
+
+/* the assembly (src/asm/units.s) against its C versions, on copies of the
+ * live units with random changes; returns the number of mismatches (plus 1
+ * if some kind of case never came up) and leaves everything (the generator
+ * too) as it was */
+uint16_t units_selftest(void)
+{
+    /* scratch: the route search buffers (free outside a search) */
+    uint8_t *save = (uint8_t *)g_mem->hq, *res = save + sizeof g_un, *lst = res + 24 * MAX_UNITS;
+    uint8_t st[4], s1[4], hi0 = g_unHi, n0 = un_nSt, c0 = ut_cnt[0], c1 = ut_cnt[1], seen = 0;
+    uint24_t tick0 = g_tick;
+    uint16_t bad = 0, k, j;
+    _Static_assert(sizeof g_un + 24 * MAX_UNITS + sizeof un_st <= 3 * sizeof g_mem->hq, "scratch");
+    rnd_get(st);
+    memcpy(save, g_un, sizeof g_un);
+    memcpy(lst, un_st, sizeof un_st);
+    for (j = 0; j < un_nSt; j++) { /* every listed structure */
+        u16b_t v;
+        v.b[0] = un_st[0][j];
+        v.b[1] = un_st[1][j];
+        bad += st_find(v.v) != st_find_c(v.v);
+    }
+    for (k = 0; k < 600; k++) {
+        uint8_t from, r1, r2, a0, a1;
+        uint24_t ts;
+        tile_t t[8];
+        int16_t f[8];
+        rnd_get(s1);
+        st_mess(k, &from, t);
+        r1 = units_next(from);
+        a0 = ut_cnt[0];
+        a1 = ut_cnt[1];
+        for (j = 0; j < 8; j++) f[j] = st_find(t[j]);
+        for (j = 0; j < MAX_UNITS; j++) memcpy(res + 24 * j, &g_un[j], 24);
+        memcpy(g_un, save, sizeof g_un);
+        memcpy(un_st, lst, sizeof un_st);
+        un_nSt = n0;
+        g_unHi = hi0;
+        rnd_set(s1);
+        st_mess(k, &from, t);
+        ts = timer_sum();
+        r2 = units_next_c(from);
+        bad += r1 != r2 || a0 != ut_cnt[0] || a1 != ut_cnt[1];
+        /* cases covered: timers counted down, stops at the end, at a timer
+         * running out, at a port or factory's turn, at a warship, nuke or
+         * shell; st_find hits and misses */
+        if (timer_sum() < ts) seen |= 1;
+        if (r2 >= g_unHi)
+            seen |= 2;
+        else if (g_un[r2].type == U_WARSHIP || (g_un[r2].type >= U_ATOM && g_un[r2].type <= U_SHELL))
+            seen |= 4;
+        else
+            seen |= g_un[r2].timer == 1 ? 8 : 16;
+        for (j = 0; j < 8; j++) {
+            int16_t c = st_find_c(t[j]);
+            bad += f[j] != c;
+            seen |= c >= 0 ? 32 : 64;
+        }
+        for (j = 0; j < MAX_UNITS; j++) bad += memcmp(res + 24 * j, &g_un[j], 24) != 0;
+        memcpy(g_un, save, sizeof g_un);
+        memcpy(un_st, lst, sizeof un_st);
+        un_nSt = n0;
+        g_unHi = hi0;
+    }
+    g_tick = tick0;
+    ut_cnt[0] = c0;
+    ut_cnt[1] = c1;
+    rnd_set(st);
+    return bad + (seen != 127);
+}
+#endif

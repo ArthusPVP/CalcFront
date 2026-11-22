@@ -252,9 +252,9 @@ values are slow library loops. To reach OpenFront's 10 ticks per second:
 
 - the map lives in the unused half of video memory, one byte per tile;
 - tile coordinates, bitmaps, log2/exp2 use byte tables and byte moves, no shift loops;
-- the hottest code is hand-written eZ80 (attack front scans, the attack tile
-  loop, log2/exp2/pow, the troop-growth division), checked against its C
-  versions;
+- the hottest code is hand-written eZ80 (attacks, tile conquest, route
+  searches, troop growth, the unit loop, map painting), kept only where it
+  beats the C version and checked against it by a self-test build;
 - ship routes are guided by a coarse map of 8×8-tile cells: a quick search
   over the cells counts how far each one is from the goal, and the tile search
   follows that count around continents instead of filling every bay (at most

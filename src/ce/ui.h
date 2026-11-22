@@ -42,6 +42,9 @@ void r_request_full(void);
 void r_clamp_cam(void);
 void r_center(uint16_t x, uint16_t y);
 bool r_follow_cursor(void);
+#ifdef CF_SELFTEST
+uint16_t draw_selftest(void); /* assembly against C: mismatches */
+#endif
 
 /* hud.c */
 void fmt_num(char *dst, uint32_t v);

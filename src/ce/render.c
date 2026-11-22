@@ -21,9 +21,10 @@ int16_t r_sel = -1;
 #define VRAM ((uint8_t *)0xD40000)
 
 static uint8_t colLUT[256];
-static uint8_t line[SCR_W], rline[SCR_W];
-static uint8_t zsh;        /* log2(zoom) */
-static uint8_t railLo, railN; /* rail mark inside big tiles: offset and size */
+/* read by the assembly (src/asm/draw.s) */
+uint8_t zsh;           /* log2(zoom) */
+uint8_t railLo, railN; /* rail mark inside big tiles: offset and size */
+bool railOn;           /* any railway to draw */
 
 #define DQ 1024
 static tile_t dq[DQ];
@@ -33,7 +34,6 @@ static tile_t sq[SQ];
 static uint8_t sqn;
 static bool fullReq;
 static int drawnCamX, drawnCamY; /* camera of the picture in video memory */
-static bool railOn;              /* any railway to draw */
 
 static tile_t drawnAt[MAX_UNITS];
 static uint8_t drawnType[MAX_UNITS];
@@ -124,9 +124,21 @@ static void set_zoom_info(void)
             c += 32;                                                                  \
     } while (0)
 
+/* The assembly computes the colours itself and reads railways from
+ * g_mem->railbits; its view of the palette layout and of the tile bits: */
+_Static_assert(C_VOID == 8 && C_RAIL == 11 && C_OCEAN == 16 && C_PLAINS == 18 && C_FPLAINS == 21,
+               "draw.s colours");
+_Static_assert(C_FILL == 32 && C_BORDER == 64 && T_OWNER == 0x1F && T_TERR == 0x60 && T_FALL == 0x80,
+               "draw.s tile colours");
+_Static_assert(offsetof(sim_mem_t, railbits) == 0 && sizeof(tile_t) == 2 && SCR_W == 320, "draw.s");
+
+/* tiles already repainted this frame (direct-mapped, by low bits) */
+tile_t paintedT[64];
+
+#if defined(CF_NOASM) || defined(CF_SELFTEST)
 /* Repaint the map inside a screen rectangle (inclusive, viewport coords).
  * Walks each pixel row tile span by tile span: one colour lookup per tile. */
-static void paint_rect(int x0, int y0, int x1, int y1)
+static void paint_rect_c(int x0, int y0, int x1, int y1)
 {
     bool lastRail = false;
     int y, w, tc0, my;
@@ -224,6 +236,65 @@ static void paint_rect(int x0, int y0, int x1, int y1)
     }
 }
 
+/* repaint one map tile (x, y) unless it was already repainted this frame */
+static void repaint_tile_c(int x, int y, tile_t t)
+{
+    int sx, sy;
+    u16b_t u;
+    uint8_t slot;
+    u.v = t;
+    slot = u.b[0] & 63;
+    if (paintedT[slot] == t) return;
+    paintedT[slot] = t;
+    sx = (x - camx) << zsh;
+    sy = (y - camy) << zsh;
+    if (sx < 0 || sx >= SCR_W || sy < 0 || sy >= vh) return;
+    if (sy + zoom > vh) {
+        /* cut by the bottom of the view */
+        paint_rect_c(sx, sy, sx + zoom - 1, sy + zoom - 1);
+        return;
+    }
+    {
+        /* a whole tile: one colour, zoom x zoom pixels, rail mark in the middle */
+        uint8_t c, k, *d = VRAM + (unsigned)(sy + vy0) * SCR_W + sx;
+        bool rail = false;
+        const uint8_t *mp = g_map + t;
+        if (x < 0 || y < 0 || x >= (int)g_W || y >= (int)g_H)
+            c = C_VOID;
+        else {
+            TILE_COLOR(mp, c);
+            if (railOn && bitget(g_railbits, t)) {
+                if (zoom <= 2)
+                    c = C_RAIL;
+                else
+                    rail = true;
+            }
+        }
+        switch (zoom) {
+        case 1:
+            *d = c;
+            break;
+        case 2:
+            d[0] = d[1] = d[SCR_W] = d[SCR_W + 1] = c;
+            break;
+        default:
+            for (k = 0; k < zoom; k++, d += SCR_W) {
+                memset(d, c, zoom);
+                if (rail && (uint8_t)(k - railLo) < railN) memset(d + railLo, C_RAIL, railN);
+            }
+        }
+    }
+}
+#endif
+#ifdef CF_NOASM
+#define paint_rect paint_rect_c
+#define repaint_tile repaint_tile_c
+#else
+/* the same in assembly, src/asm/draw.s */
+void paint_rect(int x0, int y0, int x1, int y1);
+void repaint_tile(int x, int y, tile_t t);
+#endif
+
 void ui_dirty(tile_t t)
 {
     if (dqn >= DQ) {
@@ -244,6 +315,7 @@ void ui_dirty_unit(tile_t t)
 }
 
 /* ----------------------------------------------------------- sprites --- */
+/* (as fast in C as in assembly: measured) */
 __attribute__((noinline)) static void px(int x, int y, uint8_t c)
 {
     if ((unsigned)x < SCR_W && (unsigned)y < vh) VRAM[(unsigned)(y + vy0) * SCR_W + x] = c;
@@ -329,29 +401,57 @@ static void build_masks(void)
             }
 }
 
+/* C twins of the assembly (src/asm/draw.s) here and below: used with
+ * -DCF_NOASM, compared with it by draw_selftest (-DCF_SELFTEST) */
+
+/* a mask lying inside the view, top-left at (x0, y0): colours indexed by
+ * mask value (cols[0] = 0xFF: 0 is transparent); false when not inside */
+#if defined(CF_NOASM) || defined(CF_SELFTEST)
+static bool blit_in_c(const uint8_t *m, uint8_t w, uint8_t h, int x0, int y0, const uint8_t *cols)
+{
+    uint8_t x, y, *p;
+    if (x0 < 0 || y0 < 0 || x0 + w > SCR_W || y0 + h > vh) return false;
+    p = VRAM + (unsigned)(y0 + vy0) * SCR_W + x0;
+    for (y = 0; y < h; y++, p += SCR_W)
+        for (x = 0; x < w; x++, m++)
+            if (*m || cols[0] != 0xFF) p[x] = cols[*m];
+    return true;
+}
+#endif
+#ifdef CF_NOASM
+#define blit_in blit_in_c
+#else
+bool blit_in(const uint8_t *m, uint8_t w, uint8_t h, int x0, int y0, const uint8_t *cols);
+#endif
+
 /* draw a mask with its top-left at (x0, y0); colours indexed by mask value */
 static void blit(const uint8_t *m, uint8_t w, uint8_t h, int x0, int y0, const uint8_t *cols)
 {
     uint8_t x, y;
-    if (x0 >= 0 && y0 >= 0 && x0 + w <= SCR_W && y0 + h <= vh) {
-        uint8_t *p = VRAM + (unsigned)(y0 + vy0) * SCR_W + x0;
-        for (y = 0; y < h; y++, p += SCR_W)
-            for (x = 0; x < w; x++, m++)
-                if (*m || cols[0] != 0xFF) p[x] = cols[*m];
-        return;
-    }
+    if (blit_in(m, w, h, x0, y0, cols)) return; /* inside the view */
     for (y = 0; y < h; y++)
         for (x = 0; x < w; x++, m++)
             if (*m || cols[0] != 0xFF) px(x0 + x, y0 + y, cols[*m]);
 }
 
-/* screen centre of tile t */
-FORCE_INLINE void scr_xy(tile_t t, int *x, int *y)
+/* screen centre of tile t: returns x, sets scr_y, and the tile's column and
+ * row scr_tx, scr_ty */
+int scr_y, scr_tx, scr_ty;
+#if defined(CF_NOASM) || defined(CF_SELFTEST)
+static int scr_xy_c(tile_t t)
 {
-    int ty_ = ty_in(t);
-    *x = (((int)(t - g_rowStart[ty_]) - camx) << zsh) + (zoom >> 1);
-    *y = ((ty_ - camy) << zsh) + (zoom >> 1);
+    scr_ty = ty_in(t);
+    scr_tx = (int)(t - g_rowStart[scr_ty]);
+    scr_y = ((scr_ty - camy) << zsh) + (zoom >> 1);
+    return ((scr_tx - camx) << zsh) + (zoom >> 1);
 }
+#endif
+#ifdef CF_NOASM
+#define scr_xy_a scr_xy_c
+#else
+int scr_xy_a(tile_t t);
+#endif
+#define scr_xy(t, x, y) (*(x) = scr_xy_a(t), *(y) = scr_y)
 
 static void draw_struct(const unit_t *u, int cx, int cy)
 {
@@ -440,7 +540,11 @@ static void ring(int cx, int cy, int r, uint8_t c)
     }
 }
 
-static bool on_screen(int cx, int cy) { return cx > -12 && cx < SCR_W + 12 && cy > -12 && cy < vh + 12; }
+/* -12 < cx < SCR_W + 12 and the same for cy: one unsigned compare each */
+static bool on_screen(int cx, int cy)
+{
+    return (unsigned)(cx + 11) < SCR_W + 23 && (unsigned)(cy + 11) < (unsigned)vh + 23;
+}
 
 /* ---------------------------------------------------- dirty-cell grid --- */
 /* The viewport is split into 16x16 pixel cells. A cell is marked when the
@@ -449,11 +553,12 @@ static bool on_screen(int cx, int cy) { return cx > -12 && cx < SCR_W + 12 && cy
 #define CSH 4
 #define CW (SCR_W >> CSH)
 #define CH 15
-static uint8_t dcell[CH][CW];
+uint8_t dcell[CH][CW];  /* (read by the assembly too) */
+bool dirtyAny;          /* some cell is marked this frame */
+_Static_assert(CW == 20 && CH == 15 && CSH == 4, "draw.s cells");
 
-static bool dirtyAny; /* some cell is marked this frame */
-
-static void mark(int x0, int y0, int x1, int y1)
+#if defined(CF_NOASM) || defined(CF_SELFTEST)
+static void mark_c(int x0, int y0, int x1, int y1)
 {
     int cx, cy;
     if (x0 < 0) x0 = 0;
@@ -466,7 +571,7 @@ static void mark(int x0, int y0, int x1, int y1)
         for (cx = x0 >> CSH; cx <= x1 >> CSH; cx++) dcell[cy][cx] = 1;
 }
 
-static bool touched(int x0, int y0, int x1, int y1)
+static bool touched_c(int x0, int y0, int x1, int y1)
 {
     int cx, cy;
     if (x0 < 0) x0 = 0;
@@ -479,6 +584,14 @@ static bool touched(int x0, int y0, int x1, int y1)
             if (dcell[cy][cx]) return true;
     return false;
 }
+#endif
+#ifdef CF_NOASM
+#define mark mark_c
+#define touched touched_c
+#else
+void mark(int x0, int y0, int x1, int y1);
+bool touched(int x0, int y0, int x1, int y1);
+#endif
 
 #ifdef CF_PERF
 uint8_t g_perfNb, g_perfNm;
@@ -513,59 +626,6 @@ static void sprite_rect(uint8_t type, bool sel, int cx, int cy, int *x0, int *y0
     *y0 = cy + spriteBox[type][1];
     *x1 = cx + spriteBox[type][2];
     *y1 = cy + spriteBox[type][3];
-}
-
-/* tiles already repainted this frame (direct-mapped, by low bits) */
-static tile_t paintedT[64];
-
-/* repaint one map tile (x, y) unless it was already repainted this frame */
-static void repaint_tile(int x, int y, tile_t t)
-{
-    int sx, sy;
-    u16b_t u;
-    uint8_t slot;
-    u.v = t;
-    slot = u.b[0] & 63;
-    if (paintedT[slot] == t) return;
-    paintedT[slot] = t;
-    sx = (x - camx) << zsh;
-    sy = (y - camy) << zsh;
-    if (sx < 0 || sx >= SCR_W || sy < 0 || sy >= vh) return;
-    if (sy + zoom > vh) {
-        /* cut by the bottom of the view */
-        paint_rect(sx, sy, sx + zoom - 1, sy + zoom - 1);
-        return;
-    }
-    {
-        /* a whole tile: one colour, zoom x zoom pixels, rail mark in the middle */
-        uint8_t c, k, *d = VRAM + (unsigned)(sy + vy0) * SCR_W + sx;
-        bool rail = false;
-        const uint8_t *mp = g_map + t;
-        if (x < 0 || y < 0 || x >= (int)g_W || y >= (int)g_H)
-            c = C_VOID;
-        else {
-            TILE_COLOR(mp, c);
-            if (railOn && bitget(g_railbits, t)) {
-                if (zoom <= 2)
-                    c = C_RAIL;
-                else
-                    rail = true;
-            }
-        }
-        switch (zoom) {
-        case 1:
-            *d = c;
-            break;
-        case 2:
-            d[0] = d[1] = d[SCR_W] = d[SCR_W + 1] = c;
-            break;
-        default:
-            for (k = 0; k < zoom; k++, d += SCR_W) {
-                memset(d, c, zoom);
-                if (rail && (uint8_t)(k - railLo) < railN) memset(d + railLo, C_RAIL, railN);
-            }
-        }
-    }
 }
 
 /* Draw sprites: buildings first, then everything that moves, each in slot
@@ -756,64 +816,12 @@ bool r_follow_cursor(void)
 
 void r_full(void)
 {
-    int tw, th, rx, ry, xin0, xin1;
-    uint8_t *dst = VRAM + (unsigned)vy0 * SCR_W, k;
     set_zoom_info();
-    tw = SCR_W >> zsh;
-    th = vh >> zsh;
     railOn = rail_any();
     fullReq = false;
     dqn = 0;
     sqn = 0;
-    /* screen columns of tiles that exist */
-    xin0 = camx < 0 ? -camx : 0;
-    xin1 = (int)g_W - camx;
-    if (xin1 > tw) xin1 = tw;
-    for (ry = 0; ry < th; ry++) {
-        int ty_ = camy + ry;
-        bool anyRail = false;
-        if (ty_ < 0 || ty_ >= (int)g_H || xin0 >= xin1)
-            memset(line, C_VOID, SCR_W);
-        else {
-            tile_t row = g_rowStart[ty_];
-            const uint8_t *mp = g_map + row + camx + xin0;
-            uint8_t *lp = line;
-            if (xin0) {
-                memset(line, C_VOID, (unsigned)xin0 << zsh);
-                lp += (unsigned)xin0 << zsh;
-            }
-            for (rx = xin0; rx < xin1; rx++, mp++) {
-                uint8_t c;
-                TILE_COLOR(mp, c);
-                if (railOn && bitget(g_railbits, (tile_t)(mp - g_map))) {
-                    if (zoom <= 2)
-                        c = C_RAIL;
-                    else
-                        anyRail = true;
-                }
-                switch (zoom) {
-                case 8: *lp++ = c; *lp++ = c; *lp++ = c; *lp++ = c; /* fallthrough */
-                case 4: *lp++ = c; *lp++ = c; /* fallthrough */
-                case 2: *lp++ = c; /* fallthrough */
-                default: *lp++ = c;
-                }
-            }
-            if (xin1 < tw) memset(lp, C_VOID, (unsigned)(tw - xin1) << zsh);
-            if (anyRail) {
-                /* same row with the rail marks in the middle of rail tiles */
-                memcpy(rline, line, SCR_W);
-                for (rx = xin0; rx < xin1; rx++)
-                    if (bitget(g_railbits, (tile_t)(row + camx + rx)))
-                        memset(rline + (rx << zsh) + railLo, C_RAIL, railN);
-            }
-        }
-        for (k = 0; k < zoom; k++) {
-            memcpy(dst, anyRail && (uint8_t)(k - railLo) < railN ? rline : line, SCR_W);
-            dst += SCR_W;
-        }
-    }
-    /* the last row of tiles, cut by the bottom of the view */
-    if ((th << zsh) < vh) paint_rect(0, th << zsh, SCR_W - 1, vh - 1);
+    paint_rect(0, 0, SCR_W - 1, vh - 1);
     drawnCamX = camx;
     drawnCamY = camy;
     memset(dcell, 1, sizeof dcell);
@@ -940,16 +948,16 @@ void r_frame(void)
     sqn = 0;
     for (n = dqn; n; n--) {
         tile_t t = dq[dqh];
-        uint16_t y = ty_in(t);
-        int x = (int)(t - g_rowStart[y]), sx = (x - camx) << zsh, sy = ((int)y - camy) << zsh;
+        int sx = scr_xy_a(t) - (zoom >> 1), sy = scr_y - (zoom >> 1), x = scr_tx, y = scr_ty;
         dqh = (dqh + 1) & (DQ - 1);
-        if (sx < -zoom || sx > SCR_W || sy < -zoom || sy > vh) continue;
+        /* off screen with its 4 neighbours (vh need not be a multiple of zoom) */
+        if (sx < -zoom || sx > SCR_W || sy < -zoom || sy >= vh + zoom) continue;
         /* the tile and its 4 neighbours (their border shading may change) */
-        repaint_tile(x, (int)y, t);
-        repaint_tile(x - 1, (int)y, (tile_t)(t - 1));
-        repaint_tile(x + 1, (int)y, (tile_t)(t + 1));
-        repaint_tile(x, (int)y - 1, (tile_t)(t - g_W));
-        repaint_tile(x, (int)y + 1, (tile_t)(t + g_W));
+        repaint_tile(x, y, t);
+        repaint_tile(x - 1, y, (tile_t)(t - 1));
+        repaint_tile(x + 1, y, (tile_t)(t + 1));
+        repaint_tile(x, y - 1, (tile_t)(t - g_W));
+        repaint_tile(x, y + 1, (tile_t)(t + g_W));
         mark(sx - zoom, sy - zoom, sx + 2 * zoom - 1, sy + 2 * zoom - 1);
     }
     dqn = 0;
@@ -1017,3 +1025,154 @@ void r_preview(void)
         for (sx = 0; sx < w; sx++) dst[sx] = colLUT[g_map[row + sx * step]];
     }
 }
+
+#ifdef CF_SELFTEST
+/* Every assembly routine of src/asm/draw.s against its C twin: the drawing
+ * ones draw into their own half of the screen (rows 0-109 and 120-229) and
+ * the halves are compared; the others compare results (px and fill are C). Random rectangles,
+ * cameras and zooms, railways on and off, coordinates off every edge; 8- and
+ * 16-bit arguments reach the assembly with garbage in their upper bytes (as
+ * C may pass them). Returns the number of mismatching cases. Railways and
+ * fallout are XOR-ed with a pattern for the test (the map then has both)
+ * and restored after. */
+static uint32_t stSeed;
+static uint16_t st_rnd(uint16_t n)
+{
+    stSeed = stSeed * 1103515245UL + 12345;
+    return (uint16_t)((stSeed >> 12) % n);
+}
+
+/* v with random garbage above its low `bits` bits */
+static unsigned st_junk(unsigned v, uint8_t bits)
+{
+    return v | (unsigned)st_rnd(65535) << bits;
+}
+
+static void st_flip(void)
+{
+    unsigned i, n = g_rowStart[g_H];
+    for (i = 0; i < sizeof g_mem->railbits; i += 3) g_railbits[i] ^= (uint8_t)(0x11 << (i % 4));
+    for (i = 0; i < n; i += 7)
+        if (g_map[i] & T_TERR) g_map[i] ^= T_FALL;
+}
+
+static uint16_t st_cmp(void)
+{
+    uint8_t y;
+    for (y = 0; y < 110; y++)
+        if (memcmp(VRAM + (unsigned)y * SCR_W, VRAM + (unsigned)(y + 120) * SCR_W, SCR_W)) return 1;
+    return 0;
+}
+
+/* the assembly entry points, called with wide arguments */
+typedef void (*st_tile_f)(int, int, unsigned);
+typedef bool (*st_blit_f)(const uint8_t *, unsigned, unsigned, int, int, const uint8_t *);
+typedef int (*st_xy_f)(unsigned);
+
+static uint8_t stCells[2][CH][CW];
+
+uint16_t draw_selftest(void)
+{
+    uint16_t k, bad = 0;
+    uint8_t oz = zoom, oy = vy0, oh = vh;
+    int ox = camx, oc = camy;
+    bool orail = railOn;
+    stSeed = 2024;
+    st_flip();
+    memset(VRAM, C_BLACK, SCR_W * 240);
+    vh = 110;
+    for (k = 0; k < 800; k++) {
+        int x0 = (int)st_rnd(380) - 30, y0 = (int)st_rnd(150) - 20, x1, y1;
+        uint8_t c = (uint8_t)st_rnd(256);
+        zoom = (uint8_t)(1 << st_rnd(4));
+        set_zoom_info();
+        railOn = k & 1;
+        camx = (int)st_rnd(g_W + 80) - 60;
+        camy = (int)st_rnd(g_H + 60) - 40;
+        switch (k % 8) {
+        case 0:
+        case 1:
+            x1 = x0 + (int)st_rnd(k & 8 ? 340 : 40) - 3;
+            y1 = y0 + (int)st_rnd(k & 16 ? 130 : 30) - 3;
+            vy0 = 0;
+            paint_rect(x0, y0, x1, y1);
+            vy0 = 120;
+            paint_rect_c(x0, y0, x1, y1);
+            break;
+        case 2: {
+            /* a tile and its neighbours, as the dirty-tile queue does */
+            int x = camx + (int)st_rnd(SCR_W / zoom + 4) - 2, y = camy + (int)st_rnd(110 / zoom + 4) - 2, d;
+            tile_t t = (tile_t)((unsigned)y < g_H ? g_rowStart[y] + x : (unsigned)x);
+            for (d = 0; d < 5; d++) {
+                int dx = d == 1 ? -1 : d == 2 ? 1 : 0, dy = d == 3 ? -1 : d == 4 ? 1 : 0;
+                tile_t tt = (tile_t)(t + dx + dy * (int)g_W);
+                memset(paintedT, 0xFF, sizeof paintedT);
+                vy0 = 0;
+                ((st_tile_f)(void (*)(void))repaint_tile)(x + dx, y + dy, st_junk(tt, 16));
+                memset(paintedT, 0xFF, sizeof paintedT);
+                vy0 = 120;
+                repaint_tile_c(x + dx, y + dy, tt);
+            }
+            break;
+        }
+        case 3: {
+            uint8_t cols[3];
+            const uint8_t *m = st_rnd(2) ? &structMask[1 + st_rnd(6)][0][0] : &shipMask[st_rnd(3)][0][0];
+            bool a;
+            cols[0] = st_rnd(2) ? 0xFF : c;
+            cols[1] = (uint8_t)(c + 1);
+            cols[2] = (uint8_t)(c + 2);
+            x0 = (int)st_rnd(340) - 12;
+            y0 = (int)st_rnd(130) - 12;
+            vy0 = 0;
+            a = ((st_blit_f)(void (*)(void))blit_in)(m, st_junk(9, 8), st_junk(9, 8), x0, y0, cols);
+            vy0 = 120;
+            bad += a != blit_in_c(m, 9, 9, x0, y0, cols);
+            break;
+        }
+        case 4:
+        case 5: {
+            bool da, t;
+            uint8_t i;
+            memset(dcell, 0, sizeof dcell);
+            for (i = 0; i < 4; i++) dcell[st_rnd(CH)][st_rnd(CW)] = 1;
+            x1 = x0 + (int)st_rnd(60) - 5;
+            y1 = y0 + (int)st_rnd(60) - 5;
+            t = touched(x0, y0, x1, y1);
+            bad += t != touched_c(x0, y0, x1, y1);
+            memcpy(stCells[0], dcell, sizeof dcell);
+            dirtyAny = false;
+            mark(x0, y0, x1, y1);
+            da = dirtyAny;
+            memcpy(stCells[1], dcell, sizeof dcell);
+            memcpy(dcell, stCells[0], sizeof dcell);
+            dirtyAny = false;
+            mark_c(x0, y0, x1, y1);
+            bad += da != dirtyAny || memcmp(stCells[1], dcell, sizeof dcell) != 0;
+            break;
+        }
+        default: {
+            /* screen centre of a tile, and the on-screen test */
+            tile_t t = (tile_t)st_rnd(g_rowStart[g_H]);
+            int sx = scr_xy_c(t), sy = scr_y, tx_ = scr_tx, ty_ = scr_ty, cx, cy;
+            bad += ((st_xy_f)(void (*)(void))scr_xy_a)(st_junk(t, 16)) != sx || scr_y != sy || scr_tx != tx_ || scr_ty != ty_;
+            cx = (int)st_rnd(400) - 40;
+            cy = (int)st_rnd(200) - 40;
+            bad += on_screen(cx, cy) != (cx > -12 && cx < SCR_W + 12 && cy > -12 && cy < vh + 12);
+        }
+        }
+        bad += st_cmp();
+    }
+    st_flip();
+    zoom = oz;
+    vy0 = oy;
+    vh = oh;
+    camx = ox;
+    camy = oc;
+    railOn = orail;
+    set_zoom_info();
+    memset(dcell, 0, sizeof dcell);
+    fullReq = true;
+    return bad;
+}
+#endif

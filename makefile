@@ -16,3 +16,9 @@ CXXFLAGS = -Wall -Wextra -Oz -fno-inline-functions -fno-jump-tables
 LTOFLAGS = $(CFLAGS)
 
 include $(shell cedev-config --makefile)
+
+# make CFLAGS="... -DCF_NOASM": the game on the C version of every hand-written
+# routine (src/asm/ is left out), to compare speed or to debug the assembly
+ifneq (,$(findstring CF_NOASM,$(CFLAGS)))
+ASMSOURCES :=
+endif

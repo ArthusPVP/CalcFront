@@ -70,22 +70,40 @@ needed → AI → diplomacy every 16 ticks → win check every 32 ticks.
 | `ce/hud.c` | Number formatting (troops shown /10 like OpenFront, percentages, times), the screen layout for normal and pro mode, the status bar, the info line and the action-key bar. Each part remembers what it shows and is redrawn only when that changes. |
 | `ce/ui.h` | Palette indices, screen layout, renderer and HUD declarations. |
 
-Hand-written eZ80, each with a C version for the PC harness (and for builds
-with `-DCF_NOASM`); the profiling build checks them against each other:
+Hand-written eZ80, each routine with a C version (suffix `_c`) that the PC
+harness runs. A routine is kept in assembly only where it measured faster on
+the calculator than its C version (pixel and rectangle fills, unit counting:
+as fast in C, so C).
 
 - `src/asm/front.s`: the attack front scan, a whole box of rows in one call
   (frontier tiles of the defender touching the attacker, reservoir-sampled
   into the ring);
 - `src/asm/attack.s`: the per-tick setup and the tile loop of an attack, and
   the small helpers they use (24-bit division, Q8 multiply, free-land cost,
-  `rnd_n` for small ranges). C versions in `attack.c`; `attack_selftest()`
-  checks them on random inputs and on copies of the running attacks, but the
-  profiling build leaves it out to fit in RAM: build it into a normal game
-  to run it;
-- `src/asm/fx.s`: `fx_log2`, `fx_exp2` and `fx_pow` for troop growth and caps
-  (C versions in `fx.c`);
-- in `game.c`, the economy's 8-step division and MLT multiply, and in
-  `attack.c`, the terrain-type rotate: spots where clang emits library loops.
+  `rnd_n` for small ranges), plus the terrain-type rotate in `attack.c`;
+- `src/asm/mapconq.s`: `conquer` (owner, bounding box, coast counts) and
+  `scan_player` (a player's neighbours);
+- `src/asm/mapsrch.s`, `src/asm/mapbfs.s`: the ship route search loop (heap and
+  guide key inlined) and the coarse guide's breadth-first search;
+- `src/asm/econ.s`: troop growth and gold (`econ_grow`, the common case; rare
+  cases fall back to C), troop caps (`calc_max`) and relation decay;
+- `src/asm/units.s`: the unit loop's walk to the next unit with work to do,
+  and the structure lookup by tile;
+- `src/asm/draw.s`: `paint_rect` (also the full redraw) and `repaint_tile`,
+  sprite blits, tile-to-screen coordinates and the dirty-cell grid;
+- `src/asm/fx.s`: `fx_log2`, `fx_exp2` and `fx_pow`.
+
+**Checking the assembly.** Results must equal the C versions bit for bit:
+the benchmark's checksums (calculator) must equal the PC harness's at every
+checkpoint, and a self-test build compares every assembly routine with its
+C version on random and edge inputs and on copies of the live game:
+`make CFLAGS="-Wall -Wextra -Oz -fno-inline-functions -fno-jump-tables -DCF_SELFTEST -DCF_TESTS=3"`
+(same `LTOFLAGS`). At tick 500 of a game it shows the mismatches per module,
+all of which must be 0. All the tests together do not fit in RAM next to the
+game's work area, so `CF_TESTS` picks some: 1 attack, 2 map, 4 economy,
+8 units, 16 drawing (3 and 28 cover everything in two builds). The profiling
+build only checks `fx.s`. `-DCF_NOASM` builds the game on the C versions alone
+(the makefile then leaves `src/asm/` out).
 
 **Code size and speed rules.** The build uses `-Oz -fno-inline-functions`:
 inlining big functions into their callers makes eZ80 code larger. Small helpers

@@ -261,29 +261,29 @@ static uint32_t trade_gold(uint16_t tiles)
     return ((75000UL * s256) >> 8) + 50 * d;
 }
 
+/* 125 * 65536 / boost^2 for 0..5 port levels (6 and more: 125), with
+ * OpenFront's small-economy boost = 256 + (128 * (6 - lv) / 5) / lv */
+static const uint8_t spawnOdds[6] = {48, 55, 86, 103, 114, 120};
+
 void port_tick(uint8_t i)
 {
     unit_t *port = &g_un[i], *dst = 0, *u;
     uint8_t p = port->owner, comp, n = 0, k, l, slot;
     uint8_t cand[48];
-    uint16_t cdist[48], lv, f, boost, nb, close;
-    uint32_t rate, total = 0, roll;
+    uint16_t cdist[48], lv, nb, close, rate, total = 0, roll;
     tile_t w0, w1;
 
     if (((uint8_t)g_tick + i) & 7) return;
     if (g_nTrade >= TRADE_CAP) return;
 
     /* spawn odds per port level, with OpenFront's small-economy boost and
-     * pity timer; checked every 8 ticks */
+     * pity timer; checked every 8 ticks (at most 125 * 30 = 3750) */
     lv = levels_of(p, U_PORT);
-    f = lv >= 6 ? 0 : (uint16_t)((6 - lv) * 256 / 5);
-    boost = (uint16_t)(256 + ((128u * f) >> 8) / (lv ? lv : 1));
-    rate = (125UL * 65536UL) / ((uint32_t)boost * boost);
-    rate /= (uint32_t)port->aux2 + 1;
-    rate = rate * TRADE_CAP / (TRADE_CAP - g_nTrade);
+    rate = (uint8_t)((lv < 6 ? spawnOdds[lv] : 125) / (uint8_t)(port->aux2 + 1u));
+    rate = (uint16_t)(rate * TRADE_CAP / (uint8_t)(TRADE_CAP - g_nTrade));
     if (!rate) rate = 1;
     for (l = 0; l < port->level; l++) {
-        if (rnd_n((uint16_t)(rate > 60000 ? 60000 : rate)) == 0) break;
+        if (rnd_n(rate) == 0) break;
         if (port->aux2 < 250) port->aux2++;
     }
     if (l == port->level) return;
@@ -303,16 +303,16 @@ void port_tick(uint8_t i)
     close = (uint16_t)((300u * 16) / g_L16); /* closer than this pays badly */
     for (k = 0; k < n; k++) {
         uint8_t j, rank = 0, mult = 1;
-        for (j = 0; j < n; j++)
-            if (cdist[j] < cdist[k]) rank++;
         if (cdist[k] >= close) {
+            for (j = 0; j < n; j++)
+                if (cdist[j] < cdist[k]) rank++;
             if (rank < nb) mult++;
             if (ALLIED(p, g_un[cand[k]].owner)) mult++;
         }
         cdist[k] = (uint16_t)(g_un[cand[k]].level * mult); /* now the weight */
         total += cdist[k];
     }
-    roll = rnd_n((uint16_t)total);
+    roll = rnd_n(total);
     for (k = 0; k < n; k++) {
         if (roll < cdist[k]) {
             dst = &g_un[cand[k]];
@@ -477,6 +477,7 @@ static void veterancy(unit_t *ws)
 {
     if (ws->level < 3 && ws->troops >= (uint32_t)(5 * (ws->level + 1))) {
         ws->level++;
+        g_unChanged = 1;
         ws->hp = (uint8_t)(ws->hp + 20);
     }
 }
@@ -485,6 +486,7 @@ static void capture_trade(unit_t *ws, unit_t *t)
 {
     uint8_t old = t->owner;
     t->owner = ws->owner;
+    g_unChanged = 1;
     if (!trade_redirect(t)) {
         del_unit(t);
         return;

@@ -7,6 +7,22 @@ static const uint8_t thinkEvery[4] = {9, 7, 6, 4};
 /* % of the troop cap a nation keeps before hitting back at an attacker */
 static const uint8_t fightMin[4] = {55, 35, 15, 15};
 
+/* &g_pl[p]: the index shift is a library call on the eZ80 */
+FORCE_INLINE player_t *plp(uint8_t p)
+{
+#ifdef HOST
+    return &g_pl[p];
+#else
+    union {
+        uint24_t v;
+        uint8_t b[3];
+    } u;
+    u.v = 0;
+    u.b[1] = p;
+    return (player_t *)((uint8_t *)g_pl + u.v);
+#endif
+}
+
 void ai_init_player(uint8_t p)
 {
     g_pl[p].aiWait = (uint8_t)(2 + rnd_n(8));
@@ -40,15 +56,16 @@ static tile_t own_tile_near(uint8_t p, tile_t c, uint8_t r, uint8_t tries)
     return NO_TILE;
 }
 
-static uint8_t pick_neighbor(uint8_t p, bool tribeStyle)
+static uint8_t pick_neighbor(player_t *pl, uint8_t p, bool tribeStyle)
 {
-    player_t *pl = &g_pl[p];
     uint32_t mask = pl->nbrs & ~pl->allies;
-    uint8_t i, best = 0;
+    uint8_t i, best = 0, htgt;
     uint32_t bestScore = 0xFFFFFFFF;
+    player_t *o = plp(1);
     if (!mask) return 0;
-    for (i = 1; i <= g_nplayers; i++) {
-        player_t *o = &g_pl[i];
+    /* the player's target, when allied with the player */
+    htgt = g_pl[HUMAN].alive && MASKBIT(pl->allies, HUMAN) ? g_pl[HUMAN].target : 0;
+    for (i = 1; i <= g_nplayers; i++, o++) {
         uint32_t score;
         if (!MASKBIT(mask, i) || !o->alive || i == p) continue;
         if (tribeStyle) {
@@ -60,7 +77,7 @@ static uint8_t pick_neighbor(uint8_t p, bool tribeStyle)
             if (o->traitor) score >>= 1;
             if (pl->rel[i] < -50) score -= score >> 2; /* hostile */
             if (pl->rel[i] > 30) score += score >> 1;
-            if (g_pl[HUMAN].alive && ALLIED(p, HUMAN) && g_pl[HUMAN].target == i) score >>= 1;
+            if (i == htgt) score >>= 1;
             if (i == pl->aiEnemy) score >>= 1;
         }
         if (score < bestScore) {
@@ -71,36 +88,36 @@ static uint8_t pick_neighbor(uint8_t p, bool tribeStyle)
     return best;
 }
 
-static void answer_requests(uint8_t p)
+static void answer_requests(player_t *pl, uint8_t p)
 {
-    player_t *pl = &g_pl[p];
     uint8_t i;
     if (!pl->reqFrom) return;
     for (i = 1; i <= g_nplayers; i++) {
         bool yes;
+        player_t *o;
         if (!MASKBIT(pl->reqFrom, i)) continue;
+        o = plp(i);
         if (pl->type == PT_TRIBE)
             yes = true;
         else {
-            yes = pl->rel[i] > -15 && !attacking(i, p) && !g_pl[i].traitor;
+            yes = pl->rel[i] > -15 && !attacking(i, p) && !o->traitor;
             /* a strong nation would rather eat a weak neighbour */
             if (yes && g_cfg.difficulty >= DIFF_HARD && MASKBIT(pl->nbrs, i) &&
-                g_pl[i].troops < pl->troops / 3)
+                o->troops < pl->troops / 3)
                 yes = false;
-            if (yes && attacking(p, i) && pl->troops > g_pl[i].troops) yes = false;
+            if (yes && attacking(p, i) && pl->troops > o->troops) yes = false;
         }
         ally_answer(i, p, yes);
     }
 }
 
-static void tribe_think(uint8_t p)
+static void tribe_think(player_t *pl, uint8_t p)
 {
-    player_t *pl = &g_pl[p];
     uint8_t from, trigger = (uint8_t)(50 + (pl->aiFlags & 31));
     uint8_t target;
-    answer_requests(p);
+    answer_requests(pl, p);
     if (pl->troops < (pl->maxTroops / 100) * trigger) return;
-    if (incoming_troops(p, &from) && from && !ALLIED(p, from)) {
+    if (incoming_troops(p, &from) && from && !MASKBIT(pl->allies, from)) {
         if (attack_start(p, from, pl->troops / 3, true)) return;
     }
     if (pl->nbrTN) {
@@ -114,7 +131,7 @@ static void tribe_think(uint8_t p)
         if (pl->nbrTN) return;
     } else if ((rnd() & 7) == 0)
         pl->aiFlags &= (uint8_t)~64;
-    target = pick_neighbor(p, true);
+    target = pick_neighbor(pl, p, true);
     if (target) attack_start(p, target, pl->troops / 3, true);
 }
 
@@ -359,33 +376,40 @@ static void nation_boat(uint8_t p)
     if (best != NO_TILE) launch_boat(p, best, pl->troops / 4);
 }
 
-static void nation_think(uint8_t p)
+static void nation_think(player_t *pl, uint8_t p)
 {
-    player_t *pl = &g_pl[p];
-    uint8_t diff = g_cfg.difficulty, from, target;
+    uint8_t diff = g_cfg.difficulty, from, target, e, i;
     uint32_t inc, pct;
 
     pl->aiFlags++;
     pl->aiTurn++;
     if ((pl->aiFlags & 15) == 0) scan_player(p);
-    answer_requests(p);
+    answer_requests(pl, p);
 
     /* forget an enemy once the war is over and the grudge has faded */
-    if (pl->aiEnemy && (!g_pl[pl->aiEnemy].alive || ALLIED(p, pl->aiEnemy) ||
-                        (pl->rel[pl->aiEnemy] >= -50 && !attacking(p, pl->aiEnemy) &&
-                         !attacking(pl->aiEnemy, p))))
+    e = pl->aiEnemy;
+    if (e && (!plp(e)->alive || MASKBIT(pl->allies, e) ||
+              (pl->rel[e] >= -50 && !attacking(p, e) && !attacking(e, p))))
         pl->aiEnemy = 0;
     inc = incoming_troops(p, &from);
     if (inc && from) pl->aiEnemy = from;
     {
         /* trade: stop with the players we hate; on Easy and Medium start
-         * again once the grudge has faded to neutral (OpenFront) */
-        uint8_t i;
-        for (i = 1; i <= g_nplayers; i++) {
-            if (pl->rel[i] < -50)
-                MASKSET(pl->embargo, i);
-            else if (pl->rel[i] >= 0 && diff <= DIFF_MEDIUM)
-                MASKCLR(pl->embargo, i);
+         * again once the grudge has faded to neutral (OpenFront). Walks
+         * the embargo mask bit by bit (rel < -50: rel + 128 < 78). */
+        uint8_t *em = (uint8_t *)&pl->embargo, bit = 2, lift = diff <= DIFF_MEDIUM;
+        const uint8_t *r = (const uint8_t *)pl->rel + 1;
+        for (i = 1; i <= g_nplayers; i++, r++) {
+            uint8_t v = *r;
+            if ((uint8_t)(v + 128) < 78)
+                *em |= bit;
+            else if (!(v & 0x80) && lift)
+                *em &= (uint8_t)~bit;
+            bit <<= 1;
+            if (!bit) {
+                bit = 1;
+                em++;
+            }
         }
     }
 
@@ -397,10 +421,10 @@ static void nation_think(uint8_t p)
 
     /* ask for help when in trouble */
     if (inc > pl->troops / 2 && (rnd() & 3) == 0) {
-        uint8_t i;
-        for (i = 1; i <= g_nplayers; i++)
-            if (i != p && i != from && g_pl[i].alive && g_pl[i].type != PT_TRIBE &&
-                !ALLIED(p, i) && pl->rel[i] >= 0 && MASKBIT(pl->nbrs, i)) {
+        player_t *o = plp(1);
+        for (i = 1; i <= g_nplayers; i++, o++)
+            if (i != p && i != from && o->alive && o->type != PT_TRIBE &&
+                !MASKBIT(pl->allies, i) && pl->rel[i] >= 0 && MASKBIT(pl->nbrs, i)) {
                 ally_request(p, i);
                 break;
             }
@@ -408,27 +432,28 @@ static void nation_think(uint8_t p)
 
     /* free land first */
     if (pl->nbrTN) {
-        if (pct >= 25 && !attacking(p, 0)) {
+        bool busy = attacking(p, 0);
+        if (pct >= 25 && !busy) {
             if (attack_start(p, 0, pl->troops / (diff >= DIFF_HARD ? 3 : 4), true)) return;
             pl->nbrTN = 0;
-        } else if (attacking(p, 0))
+        } else if (busy)
             return;
     }
 
     /* fight back, once saved up as OpenFront's nations do: Easy only past
      * its attack trigger, Medium past its reserve, Hard and up at once */
-    if (inc && from && !ALLIED(p, from) && pct >= fightMin[diff]) {
+    if (inc && from && !MASKBIT(pl->allies, from) && pct >= fightMin[diff]) {
         if (attack_start(p, from, pl->troops / 2, true)) return;
     }
 
     if (pct < (uint32_t)(70 - diff * 8)) return;
 
-    target = pick_neighbor(p, false);
+    target = pick_neighbor(pl, p, false);
     /* spare the player on the lower difficulties, as OpenFront does: on Easy
      * attack them one time in 4, on Medium three times in 4 */
     if (target == HUMAN && diff <= DIFF_MEDIUM && (rnd_n(4) == 0) == (diff == DIFF_MEDIUM)) return;
     if (target) {
-        player_t *o = &g_pl[target];
+        player_t *o = plp(target);
         if (o->type == PT_TRIBE || pl->troops > (o->troops / 4) * 3 ||
             (target == pl->aiEnemy && o->troops / 3 < pl->troops)) {
             pl->aiEnemy = target;
@@ -440,9 +465,9 @@ static void nation_think(uint8_t p)
 
     /* occasional treachery on the higher difficulties */
     if (diff >= DIFF_HARD && !target && pl->allies && (rnd() & 15) == 0) {
-        uint8_t i;
-        for (i = 1; i <= g_nplayers; i++)
-            if (ALLIED(p, i) && MASKBIT(pl->nbrs, i) && g_pl[i].troops < pl->troops / 3) {
+        player_t *o = plp(1);
+        for (i = 1; i <= g_nplayers; i++, o++)
+            if (MASKBIT(pl->allies, i) && MASKBIT(pl->nbrs, i) && o->troops < pl->troops / 3) {
                 ally_break(p, i);
                 pl->aiEnemy = i;
                 break;
@@ -450,22 +475,27 @@ static void nation_think(uint8_t p)
     }
 }
 
+/* each player thinks in one tick of 8 (p & 7 == g_tick & 7): only those
+ * are visited, in increasing order as before */
 void ai_tick(void)
 {
-    uint8_t p, slot = (uint8_t)(g_tick & 7);
-    for (p = 2; p <= g_nplayers; p++) {
-        player_t *pl = &g_pl[p];
-        if (!pl->alive || (p & 7) != slot) continue;
-        if (pl->aiWait) {
+    uint8_t p = (uint8_t)g_tick & 7;
+    player_t *pl;
+    if (p < 2) p += 8;
+    if (p > g_nplayers) return;
+    for (pl = plp(p);; pl += 8) {
+        if (!pl->alive)
+            ;
+        else if (pl->aiWait)
             pl->aiWait--;
-            continue;
-        }
-        if (pl->type == PT_TRIBE) {
+        else if (pl->type == PT_TRIBE) {
             pl->aiWait = (uint8_t)(5 + rnd_n(6));
-            PROF(11, tribe_think(p));
+            PROF(11, tribe_think(pl, p));
         } else if (pl->type == PT_NATION) {
             pl->aiWait = thinkEvery[g_cfg.difficulty];
-            nation_think(p);
+            nation_think(pl, p);
         }
+        p += 8;
+        if (p > g_nplayers) break;
     }
 }

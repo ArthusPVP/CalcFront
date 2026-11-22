@@ -280,6 +280,7 @@ typedef union {
 
 extern unit_t g_un[MAX_UNITS];
 extern uint8_t g_unHi; /* every unit lives below this index */
+extern uint8_t g_unChanged; /* set when the unit counts must be redone */
 
 #define BUILT(u) ((u)->hp != 0)
 enum { WS_PATROL, WS_RETREAT, WS_DOCKED };
@@ -393,6 +394,9 @@ int8_t path_step(uint8_t slot, uint16_t idx); /* dir 0-3, or -1 at the end */
 bool path_complete(uint8_t slot);             /* reaches its goal (not truncated) */
 tile_t line_point(tile_t a, tile_t b, uint16_t k, uint16_t n); /* k-th of n steps */
 uint16_t line_len(tile_t a, tile_t b);
+#ifdef CF_SELFTEST
+uint16_t map_selftest(void); /* assembly vs C (src/asm/map*.s): mismatches */
+#endif
 
 /* game.c */
 void game_new(const game_cfg_t *cfg, uint32_t seed);
@@ -407,6 +411,9 @@ void sub_troops(uint8_t p, uint32_t n);
 uint16_t land_pct10(uint8_t p);  /* share of the land in 0.1% */
 uint16_t land_pct100(uint8_t p); /* share of the land in 0.01% */
 uint16_t sim_checksum(void);
+#ifdef CF_SELFTEST
+uint16_t econ_selftest(void); /* assembly vs C: mismatches */
+#endif
 
 /* attack.c */
 bool attack_start(uint8_t att, uint8_t def, uint32_t troops, bool removeFromOwner);
@@ -417,7 +424,7 @@ bool borders(uint8_t att, uint8_t def);
 uint32_t incoming_troops(uint8_t p, uint8_t *from);
 bool attacking(uint8_t att, uint8_t def);
 void attacks_drop_player(uint8_t p);
-#ifdef CF_PERF
+#ifdef CF_SELFTEST
 uint16_t attack_selftest(void); /* assembly vs C: mismatches */
 #endif
 
@@ -440,6 +447,9 @@ uint8_t count_units(uint8_t p, uint8_t type);
 uint8_t sam_range(uint8_t level);
 void nuke_radius(uint8_t type, uint8_t *inner, uint8_t *outer);
 int16_t find_silo(uint8_t p);
+#ifdef CF_SELFTEST
+uint16_t units_selftest(void); /* assembly vs C: mismatches */
+#endif
 
 /* ships.c */
 bool launch_boat(uint8_t p, tile_t target, uint32_t troops);

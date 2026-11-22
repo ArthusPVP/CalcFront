@@ -216,9 +216,10 @@ static uint32_t benchSum[12], benchFrames;
 static uint16_t benchCheck, benchCk[12];
 static const uint16_t benchAt[12] = {0, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000};
 
-/* the assembly against its C versions: number of mismatches (the attack
- * routines have their own, attack_selftest(), left out: with it this build
- * no longer fits in RAM next to the game's work area) */
+/* the fixed-point assembly against its C versions: number of mismatches
+ * (the other assembly is checked by the self-test build, -DCF_SELFTEST:
+ * with it this build would no longer fit in RAM next to the game's work
+ * area) */
 static uint16_t asm_selftest(void)
 {
     uint16_t k, bad = 0;
@@ -1065,6 +1066,54 @@ static void title_backdrop(void)
     }
 }
 
+#ifdef CF_SELFTEST
+/* Self-test build (-DCF_SELFTEST): at tick 500 of a game, the hand-written
+ * assembly against its C versions, on random and edge inputs and on copies
+ * of the live game; the screen lists the mismatches (all must be 0). All the
+ * tests together do not fit in RAM next to the game's work area: pick some
+ * with -DCF_TESTS=mask (1 attack, 2 map, 4 economy, 8 units, 16 draw); the
+ * compiler leaves out the others and their C versions. */
+#ifndef CF_TESTS
+#define CF_TESTS 3
+#endif
+static void self_test(void)
+{
+    static const char *const names[5] = {"attack ", "map ", "economy ", "units ", "draw "};
+    uint16_t bad[5];
+    uint8_t i;
+    char buf[32], *p;
+    memset(bad, 0xFF, sizeof bad); /* 65535: not in this build */
+#if CF_TESTS & 1
+    bad[0] = attack_selftest();
+#endif
+#if CF_TESTS & 2
+    bad[1] = map_selftest();
+#endif
+#if CF_TESTS & 4
+    bad[2] = econ_selftest();
+#endif
+#if CF_TESTS & 8
+    bad[3] = units_selftest();
+#endif
+#if CF_TESTS & 16
+    bad[4] = draw_selftest();
+#endif
+    gfx_FillScreen(C_BLACK);
+    hud_center("ASSEMBLY SELF-TEST (mismatches)", 60, C_YELLOW);
+    for (i = 0; i < 5; i++) {
+        p = s_cat(buf, names[i]);
+        if (bad[i] == 0xFFFF)
+            s_cat(p, "not in this build");
+        else
+            s_num(p, bad[i]);
+        hud_center(buf, 90 + i * 14, bad[i] == 0xFFFF ? C_DIM : bad[i] ? C_RED : C_GREEN);
+    }
+    wait_key();
+    hud_invalidate(); /* the whole screen was cleared */
+    r_request_full();
+}
+#endif
+
 /* returns 0 to quit, 1 for a new game, 2 to continue the saved one */
 static uint8_t title_screen(void)
 {
@@ -1692,6 +1741,9 @@ static bool play(bool resume)
             uint8_t n = 0;
             while ((clock_t)(now - last) >= period / speed && n < speed) {
                 game_tick();
+#ifdef CF_SELFTEST
+                if (g_tick == 500) self_test();
+#endif
 #ifdef CF_PERF
                 if (g_tick == BENCH_TICKS) benchCheck = sim_checksum();
                 {

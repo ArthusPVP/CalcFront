@@ -15,104 +15,62 @@ const uint16_t g_mulQ8[N_MULS] = {128, 256, 384, 512, 768, 1280};
 static const uint16_t startTroops[4] = {12500, 18750, 25000, 31250};
 /* nation growth by difficulty, 230 243 256 269 in Q8: the low byte (the part
  * above 256 from hard on) */
-static const uint8_t growLo[4] = {230, 243, 0, 13};
+__attribute__((used)) const uint8_t growLo[4] = {230, 243, 0, 13};
 
-/* 32 bits read as a native 24-bit value when the top byte is 0 (w is the
- * low 3 bytes on the calculator, the whole value on the PC) */
-typedef union {
-    uint32_t v;
-    uint24_t w;
-    uint8_t b[4];
-} u32w_t;
-
-/* econ_div8(n, d) = n / ((d >> 8) + 1) for n <= d < 2^24 (it fits 8 bits,
- * as d < 256 * ((d >> 8) + 1)): 8 restoring steps instead of the 24 of a
- * 24-bit division. econ_mulq8(a, g) = (a * g) >> 8 for a < 2^24, from three
- * 8x8 MLTs: a = b2:b1:b0 gives b2*g*256 + b1*g + (b0*g >> 8), exactly. */
-#ifdef HOST
-static uint8_t econ_div8(uint24_t n, uint24_t d) { return (uint8_t)(n / ((d >> 8) + 1)); }
-static uint24_t econ_mulq8(uint24_t a, uint8_t g) { return (uint24_t)(((uint32_t)a * g) >> 8); }
+/* The economy's hot paths are hand-written eZ80 on the calculator
+ * (src/asm/econ.s): econ_grow() (troop growth and gold, every player every
+ * tick) and calc_max() (troop cap, every 16 ticks), with the helpers
+ * econ_div8() and econ_mulq8(). The C versions below (suffix _c) are the PC
+ * harness's; on the calculator econ_grow_c() also takes the rare cases (a
+ * troop multiplier, troops or cap from 2^24), and the self-test
+ * (CF_SELFTEST) compares each pair.
+ *
+ * econ_div8(n, d) = n / ((d >> 8) + 1) for n <= d < 2^24 (it fits 8 bits, as
+ * d < 256 * ((d >> 8) + 1)): 8 restoring steps. econ_mulq8(a, g) =
+ * (a * g) >> 8 for a < 2^16, from two 8x8 MLTs. */
+#if defined(HOST) || defined(CF_NOASM) || defined(CF_SELFTEST)
+uint8_t econ_div8_c(uint24_t n, uint24_t d) { return (uint8_t)(n / ((d >> 8) + 1)); }
+uint24_t econ_mulq8_c(uint24_t a, uint8_t g) { return (uint24_t)((a * g) >> 8); }
+/* the relations to players 1..31: one point toward 0 */
+void econ_fade_c(int8_t *r)
+{
+    uint8_t k;
+    for (k = 1; k < MAXP; k++, r++)
+        if (*r) *r += *r < 0 ? 1 : -1;
+}
+#endif
+#if defined(HOST) || defined(CF_NOASM)
+#define econ_grow econ_grow_c
+#define calc_max calc_max_c
+#define econ_div8 econ_div8_c
+#define econ_mulq8 econ_mulq8_c
+#define econ_fade econ_fade_c
 #else
+void econ_fade(int8_t *r);
+void econ_grow(player_t *pl);
+void calc_max(player_t *pl);
 uint8_t econ_div8(uint24_t n, uint24_t d);
 uint24_t econ_mulq8(uint24_t a, uint8_t g);
-/* asm-begin */
-__asm__("\t.assume\tADL = 1\n"
-        "\t.section\t.text._econ_div8,\"ax\",@progbits\n"
-        "\t.globl\t_econ_div8\n"
-        "_econ_div8:\n"
-        "\tld\tiy, 0\n"
-        "\tadd\tiy, sp\n"
-        "\tor\ta, a\n"
-        "\tsbc\thl, hl\n"
-        "\tld\tl, (iy + 7)\n"
-        "\tld\th, (iy + 8)\n"   /* d >> 8 */
-        "\tinc\thl\n"           /* q <= 65536 */
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"       /* Q = q << 7 <= 2^23 */
-        "\tex\tde, hl\n"
-        "\tld\thl, (iy + 3)\n"  /* n < 2Q, and stays so */
-        "\tld\tb, 8\n"
-        ".Lcf_div:\n"
-        "\tor\ta, a\n"
-        "\tsbc\thl, de\n"
-        "\tjr\tnc, .Lcf_fit\n"
-        "\tadd\thl, de\n"       /* undo, sets carry */
-        ".Lcf_fit:\n"
-        "\trla\n"               /* quotient bit, inverted */
-        "\tadd\thl, hl\n"
-        "\tdjnz\t.Lcf_div\n"
-        "\tcpl\n"
-        "\tret\n"
-        "\t.section\t.text._econ_mulq8,\"ax\",@progbits\n"
-        "\t.globl\t_econ_mulq8\n"
-        "_econ_mulq8:\n"
-        "\tld\tiy, 0\n"
-        "\tadd\tiy, sp\n"
-        "\tld\ta, (iy + 6)\n"   /* g */
-        "\tld\th, (iy + 3)\n"
-        "\tld\tl, a\n"
-        "\tmlt\thl\n"
-        "\tld\tc, h\n"          /* c = b0*g >> 8 */
-        "\tld\td, (iy + 4)\n"
-        "\tld\te, a\n"
-        "\tmlt\tde\n"           /* de = b1*g */
-        "\tld\th, (iy + 5)\n"
-        "\tld\tl, a\n"
-        "\tmlt\thl\n"           /* hl = b2*g */
-        "\tld\ta, e\n"
-        "\tadd\ta, c\n"
-        "\tld\tc, a\n"          /* low byte of the result */
-        "\tld\ta, l\n"
-        "\tadc\ta, d\n"
-        "\tld\tl, a\n"
-        "\tld\ta, h\n"
-        "\tadc\ta, 0\n"
-        "\tld\th, a\n"          /* b2*g + (b1*g >> 8) + carry < 2^16 */
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tadd\thl, hl\n"
-        "\tld\tl, c\n"
-        "\tret\n");
-/* asm-end */
+/* offsets the assembly uses */
+_Static_assert(offsetof(player_t, type) == 0 && offsetof(player_t, troops) == 3 &&
+                   offsetof(player_t, maxTroops) == 7 && offsetof(player_t, gold) == 11 &&
+                   offsetof(player_t, growth) == 15 && offsetof(player_t, tiles) == 20 &&
+                   offsetof(player_t, big8) == 47 && offsetof(player_t, cityLv) == 50,
+               "player_t offsets used by src/asm/econ.s");
+_Static_assert(offsetof(game_cfg_t, difficulty) == 2 && offsetof(game_cfg_t, goldMul) == 5 &&
+                   offsetof(game_cfg_t, troopMul) == 6 && PT_NATION == 2 && PT_TRIBE == 3 &&
+                   DIFF_HARD == 2,
+               "game_cfg_t offsets and constants used by src/asm/econ.s");
 #endif
 
-uint32_t gold_mul(uint32_t g)
+__attribute__((used)) uint32_t gold_mul(uint32_t g)
 {
     uint16_t m = g_mulQ8[g_cfg.goldMul];
     return m == 256 ? g : (g >> 8) * m + (((g & 255) * m) >> 8);
 }
 
-static uint32_t troop_mul(uint32_t t)
+/* not static: the assembly calls it */
+__attribute__((used)) uint32_t troop_mul(uint32_t t)
 {
     uint16_t m = g_mulQ8[g_cfg.troopMul];
     return m == 256 ? t : (t >> 8) * m + (((t & 255) * m) >> 8);
@@ -125,7 +83,8 @@ bool can_trade(uint8_t a, uint8_t b)
 
 #define TROOP_CAP 60000000UL
 
-static void calc_max(player_t *pl)
+#if defined(HOST) || defined(CF_NOASM) || defined(CF_SELFTEST)
+void calc_max_c(player_t *pl)
 {
     /* n = tiles * S < 2^22, so log2(n) < 22 * 256 and the Q8 power below is
      * < 2^22: 24-bit math up to the 32-bit sum */
@@ -159,6 +118,7 @@ static void calc_max(player_t *pl)
         pl->big8 = (uint8_t)((x8 * 255) / (256 + x8));
     }
 }
+#endif
 
 void add_troops(uint8_t p, uint32_t n)
 {
@@ -360,62 +320,48 @@ void kill_player(uint8_t p, uint8_t killer)
     ui_event(EV_DEAD, p, killer);
 }
 
-static void economy(player_t *pl, uint8_t p)
+/* troop growth and gold of one player for one tick (src/asm/econ.s on the
+ * calculator, which comes here for the rare cases) */
+__attribute__((used)) void econ_grow_c(player_t *pl)
 {
-    u32w_t T, M;
-
-    if (((g_tick + p) & 15) == 0) {
-        PROF(2, calc_max(pl));
-        if (pl->traitor) pl->traitor = pl->traitor > 16 ? pl->traitor - 16 : 0;
-        {
-            /* grudges fade: 1 point per 16 ticks toward neutral (OpenFront 0.05/tick) */
-            int8_t *r = pl->rel + 1;
-            uint8_t k;
-            for (k = 1; k < MAXP; k++, r++)
-                if (*r) *r += *r < 0 ? 1 : -1;
-        }
-    }
-    T.v = pl->troops;
-    M.v = pl->maxTroops;
+    uint32_t T = pl->troops, M = pl->maxTroops;
     pl->growth = 0;
-    if (T.v >= M.v) {
-        if (T.v > M.v) pl->troops = T.v - ((T.v - M.v) >> 5) - 1;
+    if (T >= M) {
+        if (T > M) pl->troops = T - ((T - M) >> 5) - 1;
     } else {
         /* (1 - troops / max) in Q8, OpenFront's: (max - tr) / (max / 256 + 1),
-         * always < 256. When max < 2^24, so is tr */
-        uint8_t r8 = !M.b[3] ? econ_div8(M.w - T.w, M.w)
-                             : (uint8_t)((M.v - T.v) / ((M.v >> 8) + 1));
+         * always < 256 */
+        uint8_t r8 = (uint8_t)((M - T) / ((M >> 8) + 1));
         /* with a troop multiplier everything scales by m: grow as the
          * unscaled game would, then scale the result */
         uint16_t m = g_mulQ8[g_cfg.troopMul];
-        uint32_t trn = m == 256 ? T.v : (T.v / m) << 8;
-        /* x^0.73 < 2^24 for any 32-bit x: shift it as a 24-bit value */
-        uint24_t add = 10 + ((uint24_t)fx_pow(trn, 187) >> 2);
-        add = econ_mulq8(add, r8);
+        /* x^0.73 < 2^24 for any 32-bit x */
+        uint32_t a, add = 10 + ((uint24_t)fx_pow(m == 256 ? T : (T / m) << 8, 187) >> 2);
+        add = mulq8(add, r8);
         if (pl->type == PT_TRIBE)
             add >>= 1;
         else if (pl->type == PT_NATION) {
             /* (add * growMul) >> 8, growMul = 256 + lo from hard on */
-            uint8_t d = g_cfg.difficulty, lo = growLo[d];
-            add = d >= DIFF_HARD ? add + econ_mulq8(add, lo) : econ_mulq8(add, lo);
+            uint8_t d = g_cfg.difficulty;
+            uint32_t g = mulq8(add, growLo[d]);
+            add = d >= DIFF_HARD ? add + g : g;
         }
         /* add one, at most up to max */
-        if (m == 256 && !M.b[3]) {
-            uint24_t a = add + 1, n = M.w - T.w;
-            if (a > n) a = n;
-            pl->troops = T.w + a;
-            pl->growth = a;
-        } else {
-            uint32_t a = (m == 256 ? add : troop_mul(add)) + 1, n = M.v - T.v;
-            if (a > n) a = n;
-            pl->troops = T.v + a;
-            pl->growth = a;
-        }
+        a = troop_mul(add) + 1;
+        if (a > M - T) a = M - T;
+        pl->troops = T + a;
+        pl->growth = a;
     }
-    {
-        uint8_t g = pl->type == PT_TRIBE ? 50 : 100;
-        pl->gold += g_cfg.goldMul == 1 ? g : gold_mul(g);
-    }
+    pl->gold += gold_mul(pl->type == PT_TRIBE ? 50 : 100);
+}
+
+/* every 16 ticks: new troop cap, traitor status and grudges fade (1 point
+ * per 16 ticks toward neutral, OpenFront 0.05/tick) */
+static void econ_slow(player_t *pl)
+{
+    PROF(2, calc_max(pl));
+    if (pl->traitor) pl->traitor = pl->traitor > 16 ? pl->traitor - 16 : 0;
+    econ_fade(pl->rel + 1);
 }
 
 void game_tick(void)
@@ -425,7 +371,10 @@ void game_tick(void)
     PERF_START();
     g_tick++;
     for (p = 1; p <= g_nplayers; p++, pl++)
-        if (pl->alive) economy(pl, p);
+        if (pl->alive) {
+            if ((((uint8_t)g_tick + p) & 15) == 0) econ_slow(pl);
+            econ_grow(pl);
+        }
     PERF_ADD(0);
     attack_tick();
     PERF_ADD(1);
@@ -438,8 +387,77 @@ void game_tick(void)
     if ((g_tick & 15) == 7) diplo_tick();
     if ((g_tick & 31) == 0 && !g_winner) {
         for (p = 1; p <= g_nplayers; p++)
-            if (g_pl[p].alive && (uint32_t)g_pl[p].tiles * 5 >= (uint32_t)g_landLeft * 4)
+            if (g_pl[p].alive && (uint24_t)g_pl[p].tiles * 5 >= (uint24_t)g_landLeft * 4)
                 g_winner = p;
     }
     PERF_ADD(11);
 }
+
+#ifdef CF_SELFTEST
+/* Self-test build: the assembly of src/asm/econ.s against the C versions,
+ * on random and edge inputs, and on copies of every player with random
+ * troops, caps, sizes, cities, types, difficulties and multipliers. The game
+ * is left as it was (generator state included). Returns the mismatches. */
+uint16_t econ_selftest(void)
+{
+    /* scratch: the route search heap (free outside a search) */
+    player_t *a = (player_t *)g_mem->hq, *b = a + 1, *s = a + 2;
+    game_cfg_t cfg = g_cfg;
+    uint8_t st[4], S = g_S, p;
+    uint16_t bad = 0, k;
+    rnd_get(st);
+    for (k = 0; k < 4000; k++) {
+        uint24_t d = ((uint24_t)rnd() << (k % 9)) ^ rnd(), n = d >> (rnd() & 15), x = rnd();
+        uint8_t g = (uint8_t)rnd();
+        if (k & 1) n = d;
+        if (k < 16) d = n = 0xFFFFFF - k;
+        if (k < 256) g = (uint8_t)k, x = 0xFFFF - (k & 3);
+        bad += econ_div8(n, d) != econ_div8_c(n, d);
+        bad += econ_mulq8(x, g) != econ_mulq8_c(x, g);
+    }
+    for (k = 0; k < 64; k++) {
+        int8_t *r1 = (int8_t *)a, *r2 = (int8_t *)b;
+        for (p = 0; p < MAXP; p++) r1[p] = r2[p] = (int8_t)(k < 8 ? 128 - k * 32 + p : rnd());
+        econ_fade(r1 + 1);
+        econ_fade_c(r2 + 1);
+        bad += memcmp(r1, r2, MAXP) != 0;
+    }
+    for (k = 0; k < 120; k++) {
+        g_cfg.difficulty = (uint8_t)(k & 3);
+        g_cfg.goldMul = k < 40 ? 1 : (uint8_t)(k % 6);
+        g_cfg.troopMul = k < 40 ? 1 : (uint8_t)(k / 6 % 6);
+        g_S = (uint8_t)(12 + rnd_n(29));
+        for (p = 1; p <= g_nplayers; p++) {
+            uint32_t r = (uint32_t)rnd() << 16 | rnd();
+            memcpy(s, &g_pl[p], sizeof *s);
+            if (k) {
+                s->type = (uint8_t)(1 + rnd_n(3));
+                s->maxTroops = r >> (k % 13);
+                s->troops = (uint32_t)rnd() << (k % 17);
+                switch (k % 5) {
+                case 0: s->troops = s->maxTroops; break;
+                case 1: s->troops = s->maxTroops - rnd_n(3); break;
+                case 2: s->troops = rnd_n(3); break;
+                }
+                s->tiles = (uint16_t)(rnd() >> (k % 16));
+                s->cityLv = k & 4 ? 0 : (uint16_t)(rnd() >> (k % 16));
+                s->gold = r ^ 0x5A5A;
+            }
+            memcpy(a, s, sizeof *s);
+            memcpy(b, s, sizeof *s);
+            econ_grow(a);
+            econ_grow_c(b);
+            bad += memcmp(a, b, sizeof *a) != 0;
+            memcpy(a, s, sizeof *s);
+            memcpy(b, s, sizeof *s);
+            calc_max(a);
+            calc_max_c(b);
+            bad += memcmp(a, b, sizeof *a) != 0;
+        }
+    }
+    g_cfg = cfg;
+    g_S = S;
+    rnd_set(st);
+    return bad;
+}
+#endif

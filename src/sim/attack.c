@@ -767,8 +767,8 @@ void attack_tick(void)
         if (a->active) run_attack(a);
 }
 
-#ifdef CF_PERF
-/* Profiling build: every assembly routine of src/asm/attack.s and front.s
+#ifdef CF_SELFTEST
+/* Self-test build: every assembly routine of src/asm/attack.s and front.s
  * against its C version, on random and edge inputs, and on the live map
  * (fronts, and the tile loop on copies of the running attacks, conquer()
  * replaced by a hook that records its calls), from the same generator state
@@ -845,6 +845,10 @@ uint16_t attack_selftest(void)
         }
         memcpy(t2, t1, sizeof *t1);
         rnd_get(stS);
+        /* both setups start from the same atk_ctx: its scratch fields (loss,
+         * t, taken, pops, key) are left by the last loop run, which here is
+         * the assembly loop below, and setup does not write them */
+        memcpy(t1 + 3, &atk_ctx, sizeof atk_ctx);
         atk_setup(t1);
         memcpy(t1 + 2, &atk_ctx, sizeof atk_ctx);
         ((atk_ctx_t *)(t1 + 2))->a = t2; /* the C version below is given the copy */
@@ -855,6 +859,7 @@ uint16_t attack_selftest(void)
         h = hookH ^ dp->troops;
         s = st_back();
         dp->troops = dt;
+        memcpy(&atk_ctx, t1 + 3, sizeof atk_ctx);
         atk_setup_c(t2);
         bad += memcmp(t1 + 2, &atk_ctx, sizeof atk_ctx) || memcmp((uint8_t *)(t1 + 2) + sizeof atk_ctx, &K, sizeof K);
         atk_ctx.conquer = hook;
