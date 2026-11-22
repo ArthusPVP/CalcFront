@@ -24,7 +24,7 @@ WHAT IS IN THIS ZIP
      arTIfiCE (https://yvantt.github.io/arTIfiCE/) brings them back; check its
      page for the OS versions it supports.
 
-   The game needs about 135 KB of free RAM while it runs (113 KB for the
+   The game needs about 125 KB of free RAM while it runs (104 KB for the
    program, 20 KB of work memory). Archive other programs if you get "Not
    enough free RAM" or a memory error.
 

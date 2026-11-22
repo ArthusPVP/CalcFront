@@ -32,7 +32,7 @@ player) and `plat_map_*` (load map files).
 | Everything else (players, attacks, units, caches, coarse route guide) | static RAM (BSS) | ~47 KB |
 | Saved game | AppVars `CFSAVE0`, `CFSAVE1`... (8 KB each, archived when possible) | ~10 KB |
 | Pro mode setting | AppVar `CFSET` | 1 B |
-| Program code | user RAM, decompressed at launch | ~108 KB |
+| Program code | user RAM, decompressed at launch | ~104 KB |
 
 **Tile byte:** bits 5–6 terrain (0 water, 1 plains, 2 highland, 3 mountain).
 Land: bits 0–4 owner (0 = nobody), bit 7 fallout. Water: bits 0–2 water body

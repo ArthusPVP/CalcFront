@@ -81,7 +81,7 @@ alliances (and break them), and launch nukes, against up to 30 computer players.
      [arTIfiCE](https://yvantt.github.io/arTIfiCE/) brings them back; check its
      page for the OS versions it supports.
 
-The game needs about **130 KB of free RAM** while it runs (108 KB of program
+The game needs about **125 KB of free RAM** while it runs (104 KB of program
 code plus 20 KB of work memory, which it creates as a temporary `CFTMP`
 variable and deletes on exit). Archive other programs and variables if you get
 *Not enough free RAM* or *ERR:MEMORY*.
